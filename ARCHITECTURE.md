@@ -4,7 +4,7 @@ Nov 12, 2026 · @Doc
 
 ## 1. Overview
 
-Vuta ("pull" in Swahili) is a single-binary Rust CLI that keeps a set of source checkouts cloned and up to date. It replaces `up.py`. Version 1 supports Git only, and one SQLite database is the only source of truth: there is no config file.
+Vuta ("pull" in Swahili) is a single-binary Rust CLI that keeps a set of source checkouts cloned and up to date. Version 1 supports Git only, and one SQLite database is the only source of truth: there is no config file.
 
 | Item | Value |
 | --- | --- |
@@ -30,18 +30,6 @@ Vuta ("pull" in Swahili) is a single-binary Rust CLI that keeps a set of source 
 - Submodule management, progress bars and JSON output.
 
 Section 13 says where each of these plugs in later.
-
-### What changes from `up.py`
-
-| In `up.py` | In Vuta |
-| --- | --- |
-| `REPOSITORIES` dict in the script | `repos` table, edited with `vuta add`, `vuta set`, `vuta remove` |
-| `LANGUAGE_DIRS` list | Not needed: clone creates parent directories. Grouping is done with tags. |
-| Paths relative to the current directory | Paths relative to a named root stored in the database |
-| Bare `git pull` | Fetch, then fast-forward only; anything else is skipped with a reason |
-| `build_v()` runs every time | A hook on the `v` repository that runs only when its revision changed |
-| One repository at a time | A bounded worker pool, 4 at a time by default |
-| Always exits 0 | 0, 1, 2, 3 or 130 (section 10) |
 
 ## 2. Repository layout
 
@@ -70,7 +58,7 @@ vuta/
 │   │   ├── mod.rs
 │   │   ├── root.rs  add.rs  scan.rs  sync.rs  list.rs  status.rs
 │   │   ├── show.rs  set.rs  tag.rs   remove.rs  hook.rs  log.rs
-│   │   └── config.rs  doctor.rs
+│   │   └── config.rs  db.rs  doctor.rs
 │   ├── db/
 │   │   ├── mod.rs             open(), pragmas, migrate()
 │   │   └── roots.rs  repos.rs  hooks.rs  runs.rs  settings.rs    typed queries
@@ -89,6 +77,7 @@ vuta/
 │       └── report.rs          sync result lines and the summary
 └── tests/
     ├── common/mod.rs          temp dirs, local bare repos, vuta command builder
+    ├── cli.rs                 global flags, db path, doctor, exit codes
     ├── registry.rs
     ├── sync.rs
     └── hooks.rs
@@ -302,9 +291,9 @@ CREATE TABLE settings (
 
 | Table | Holds | Notes |
 | --- | --- | --- |
-| `roots` | Named base directories | Replaces "run it from the partition root". At most one row is the default. |
+| `roots` | Named base directories | At most one row is the default. |
 | `repos` | One row per managed checkout | Location is `roots.path` joined with `rel_path`. `last_*` columns cache the latest result so `vuta list` needs no join. |
-| `repo_tags` | Free-form labels | Replaces `LANGUAGE_DIRS`. Drives `vuta sync --tag rust`. |
+| `repo_tags` | Free-form labels | Group repositories, for example by language. Drives `vuta sync --tag rust`. |
 | `hooks` | Commands to run after a sync | Ordered by `position` within a repository. |
 | `runs` | One row per `vuta sync` | `finished_at` stays NULL if the process was killed. |
 | `run_results` | One row per repository per run | Feeds `vuta log` and `vuta show`. |
@@ -473,7 +462,7 @@ vuta add <url> [path] [--name N] [--root R] [--tag T]... [--branch B]
                       [--filter F] [--depth N] [--no-clone]
 ```
 
-- `path` is relative to the root and defaults to the inferred name. `vuta add https://github.com/zed-industries/zed.git rust/zed --tag rust` reproduces the `up.py` layout.
+- `path` is relative to the root and defaults to the inferred name. `vuta add https://github.com/zed-industries/zed.git rust/zed --tag rust` places Zed under `rust/zed` in the default root.
 - `--filter blob:none` makes a partial clone, which suits large repositories you only build, such as Zed or Modular.
 - `--no-clone` only records the repository. The next `vuta sync` clones it.
 
@@ -501,7 +490,7 @@ vuta sync [name]... [--tag T]... [--root R] [-j N] [--fetch-only]
 - `--strict` makes a skipped repository count as a failure for the exit code.
 - `--dry-run` prints what would be cloned or fetched and exits.
 
-### Moving from `up.py`
+### Adopting an existing tree
 
 ```text
 vuta root add src D:\                     # or /mnt/src on Linux
@@ -512,7 +501,7 @@ vuta hook add v "make.bat" --platform windows
 vuta sync
 ```
 
-Scan infers names from URLs, so Modular's repository registers as `modular`. `vuta set modular --name mojo` restores the name the script used.
+Scan infers names from URLs, so Modular's repository registers as `modular`. `vuta set modular --name mojo` renames it.
 
 ## 7. Sync engine
 
@@ -589,7 +578,7 @@ pub fn run(jobs: Vec<Job>, workers: usize, stop: &AtomicBool, mut on_event: impl
 
 ## 8. Hooks
 
-A hook is a shell command attached to one repository that runs after that repository syncs. It replaces the hard-coded `build_v()`.
+A hook is a shell command attached to one repository that runs after that repository syncs, such as rebuilding V after it updates.
 
 ```text
 vuta hook add <repo> <command> [--platform any|unix|windows] [--always]
@@ -850,7 +839,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
@@ -858,19 +847,19 @@ jobs:
 ```
 
 - GitHub's runners ship with `rustup` and `git`, so the workflow needs no third-party actions.
-- `actions/checkout@v4` is a known-good tag; check for a newer major version when you create the file.
+- `actions/checkout@v7` was the latest major version on 12 Nov 2026.
 - Windows is in the matrix from the first commit. Path handling, `cmd /C` hooks and console colour are where a Linux-only test suite would miss bugs.
 
 ## 12. Milestones
 
-Five milestones, each ending in something you can run. `up.py` can be deleted after M3; M4 makes Vuta faster and more informative than the script.
+Five milestones, each ending in something you can run. M3 makes Vuta usable day to day; M4 makes it fast and adds history.
 
 | Milestone | Delivers | Done when |
 | --- | --- | --- |
 | **M0 Skeleton** | `cargo new`, clap CLI with global flags, colour plumbing and theme, database open and migration, `vuta db path`, `vuta doctor`, CI | CI is green on Linux and Windows, and `vuta doctor` reports a healthy empty database on both |
-| **M1 Registry** | `root`, `add --no-clone`, `list`, `show`, `set`, `tag`, `remove`, `config` | You can register the nine `up.py` repositories and `vuta list` shows them correctly |
+| **M1 Registry** | `root`, `add --no-clone`, `list`, `show`, `set`, `tag`, `remove`, `config` | You can register nine repositories and `vuta list` shows them correctly |
 | **M2 Sync** | Git backend, per-repository decisions, result lines, `runs` and `run_results`, exit codes, `add` clones, one repository at a time | `vuta sync` clones and fast-forwards correctly, and every skip and failure case has a passing test |
-| **M3 Scan and hooks** | `scan --tag-from-parent`, `status`, `hook add/list/remove`, hook runner | An existing `up.py` tree is adopted with `scan`, V rebuilds only when it changed, and `up.py` is retired |
+| **M3 Scan and hooks** | `scan --tag-from-parent`, `status`, `hook add/list/remove`, hook runner | An existing tree of checkouts is adopted with `scan`, and V rebuilds only when it changed |
 | **M4 Parallel and history** | Worker pool, sync lock, Ctrl-C handling, `log`, history pruning, `--fetch-only`, `--strict`, `--dry-run` | Nine repositories sync 4 at a time, Ctrl-C exits 130 with a closed run row, and `vuta log` shows past runs |
 
 M2 syncs sequentially on purpose. The per-repository logic is where correctness lives, and it is easier to test before threads are involved. M4 then wraps the same `sync_one` function in the worker pool without changing it.
