@@ -43,6 +43,16 @@ Global options: `--db <PATH>` (or `VUTA_DB`), `--color auto|always|never` (or `V
 
 Updates are fast-forward only. A checkout with local changes, local commits that diverge from upstream, a detached HEAD, no upstream branch or a different `origin` is skipped and left untouched. `vuta sync` exits 0 when everything succeeded, 1 when a repository or hook failed (or a repository was skipped, with `--strict`), 3 when it could not start, and 130 on Ctrl-C.
 
+### Scripting
+
+`vuta list`, `status`, `log` and `sync` take `--format json` and then print one JSON value on stdout, with progress and hook output on stderr:
+
+```sh
+vuta sync --format json | jq -r '.results[] | select(.outcome == "failed") | .repo'
+```
+
+The fields are described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) section 9.
+
 ### Shell completions
 
 `vuta completions <shell>` prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish`. The Debian package installs the bash, zsh and fish scripts for you. Otherwise:

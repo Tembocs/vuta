@@ -602,3 +602,116 @@ fn log_shows_runs_and_results() {
 
     env.code(3, &["log", "nope"]);
 }
+
+fn json(out: &std::process::Output) -> serde_json::Value {
+    let text = stdout(out);
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON ({e}):\n{text}"))
+}
+
+#[test]
+fn sync_as_json() {
+    let env = Env::with_root();
+    let mut live = Fixture::new();
+    let gone = Fixture::new();
+    cloned(&env, &live, "alpha");
+    cloned(&env, &gone, "beta");
+    register(&env, &live, "gamma");
+    let old = live.upstream_rev();
+    let new = live.push_commit();
+    fs::remove_dir_all(gone.path("upstream.git")).unwrap();
+
+    let out = env.code(1, &["sync", "--format", "json"]);
+    let doc = json(&out);
+    // Progress stays on stderr; stdout is only the JSON document.
+    assert!(stderr(&out).contains("Syncing 3 repositories"));
+    assert_eq!(doc["run"]["exit_code"], 1);
+    assert!(
+        doc["run"]["args"]
+            .as_str()
+            .unwrap()
+            .contains("--format json")
+    );
+    assert_eq!(doc["interrupted"], false);
+    assert_eq!(doc["tally"]["updated"], 1);
+    assert_eq!(doc["tally"]["failed"], 1);
+    assert_eq!(doc["tally"]["cloned"], 1);
+
+    let results = doc["results"].as_array().unwrap();
+    let names: Vec<&str> = results
+        .iter()
+        .map(|r| r["repo"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["alpha", "beta", "gamma"]);
+    let alpha = &results[0];
+    assert_eq!(alpha["outcome"], "updated");
+    assert_eq!(alpha["old_rev"], old.as_str());
+    assert_eq!(alpha["new_rev"], new.as_str());
+    assert_eq!(alpha["commits"], 1);
+    assert!(alpha["duration_ms"].is_u64());
+    let beta = &results[1];
+    assert_eq!(beta["outcome"], "failed");
+    assert_eq!(beta["reason"], "fetch");
+    assert!(!beta["message"].as_str().unwrap().is_empty());
+    assert_eq!(results[2]["outcome"], "cloned");
+
+    // The same results come back from the log.
+    let log = json(&env.code(0, &["log", "-n", "1", "--format", "json"]));
+    assert_eq!(log[0]["results"], doc["results"]);
+    assert_eq!(log[0]["tally"], doc["tally"]);
+    assert_eq!(log[0]["id"], doc["run"]["id"]);
+}
+
+#[test]
+fn sync_json_for_dry_runs_and_empty_selections() {
+    let env = Env::with_root();
+    let fixture = Fixture::new();
+    cloned(&env, &fixture, "alpha");
+    register(&env, &fixture, "beta");
+
+    let dry = json(&env.code(0, &["sync", "--dry-run", "--format", "json"]));
+    let actions: Vec<(&str, &str)> = dry
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["name"].as_str().unwrap(), d["action"].as_str().unwrap()))
+        .collect();
+    assert_eq!(actions, [("alpha", "fetch"), ("beta", "clone")]);
+
+    let empty = json(&env.code(0, &["sync", "--tag", "none", "--format", "json"]));
+    assert_eq!(empty["run"], serde_json::Value::Null);
+    assert_eq!(empty["results"], serde_json::json!([]));
+    assert_eq!(empty["tally"]["cloned"], 0);
+}
+
+#[test]
+fn log_as_json() {
+    let env = Env::with_root();
+    assert_eq!(
+        json(&env.code(0, &["log", "--format", "json"])),
+        serde_json::json!([])
+    );
+    let mut fixture = Fixture::new();
+    cloned(&env, &fixture, "alpha");
+    fixture.push_commit();
+    env.ok(&["sync"]);
+
+    let runs = json(&env.code(0, &["log", "--format", "json"]));
+    let runs = runs.as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(
+        runs[0]["id"].as_i64() > runs[1]["id"].as_i64(),
+        "newest first"
+    );
+    assert_eq!(runs[0]["exit_code"], 0);
+    assert!(runs[0]["finished_at"].is_i64());
+    assert_eq!(runs[0]["results"][0]["outcome"], "updated");
+
+    let alpha = json(&env.code(0, &["log", "alpha", "--format", "json"]));
+    let outcomes: Vec<&str> = alpha
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["updated", "cloned"]);
+}

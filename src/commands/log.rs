@@ -3,19 +3,22 @@
 //! Without a name, each run gets a line with its time, exit code and
 //! command, its summary, and a line per repository that did not end up
 //! to date. With a name, that repository's results are listed instead.
+//! With `--format json`, runs carry all their results.
 
 use std::process::ExitCode;
 use std::time::Duration;
 
-use super::{Ctx, now_unix, repo_by_name, stored_detail, stored_hooks, stored_status};
+use serde_json::Value;
+
+use super::{Ctx, now_unix, print_json, repo_by_name, stored_detail, stored_hooks, stored_status};
 use crate::Error;
-use crate::cli::LogArgs;
+use crate::cli::{Format, LogArgs};
 use crate::db;
 use crate::error::exit;
 use crate::model::{HookOutcome, OutcomeKind, Run};
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
-use crate::ui::{Styled, fmt_age, pad, report, text_width};
+use crate::ui::{Styled, fmt_age, json, pad, report, text_width};
 
 pub fn run(ctx: &mut Ctx, args: &LogArgs) -> Result<ExitCode, Error> {
     let conn = ctx.open_db()?;
@@ -26,6 +29,13 @@ pub fn run(ctx: &mut Ctx, args: &LogArgs) -> Result<ExitCode, Error> {
     if let Some(name) = &args.name {
         let repo = repo_by_name(&conn, name)?;
         let results = db::runs::results_for_repo(&conn, repo.id, args.limit)?;
+        if args.format == Format::Json {
+            print_json(
+                ui,
+                &Value::Array(results.iter().map(json::result).collect()),
+            )?;
+            return Ok(ExitCode::SUCCESS);
+        }
         if results.is_empty() {
             ui.progress(format_args!("{} has not been synced yet", repo.name));
             return Ok(ExitCode::SUCCESS);
@@ -45,6 +55,20 @@ pub fn run(ctx: &mut Ctx, args: &LogArgs) -> Result<ExitCode, Error> {
     }
 
     let runs = db::runs::recent(&conn, args.limit)?;
+    if args.format == Format::Json {
+        let mut items = Vec::with_capacity(runs.len());
+        for summary in &runs {
+            let mut run = json::run(&summary.run);
+            run["tally"] = json::tally(&summary.tally);
+            run["results"] = db::runs::results_for_run(&conn, summary.run.id)?
+                .iter()
+                .map(json::result)
+                .collect();
+            items.push(run);
+        }
+        print_json(ui, &Value::Array(items))?;
+        return Ok(ExitCode::SUCCESS);
+    }
     if runs.is_empty() {
         ui.progress("no sync runs yet; start one with: vuta sync");
         return Ok(ExitCode::SUCCESS);

@@ -4,15 +4,15 @@ use std::process::ExitCode;
 
 use anstyle::Style;
 
-use super::{Ctx, now_unix, root_by_name};
+use super::{Ctx, checkout_path, now_unix, print_json, root_by_name, roots_by_id};
 use crate::Error;
-use crate::cli::ListArgs;
+use crate::cli::{Format, ListArgs};
 use crate::db;
 use crate::db::repos::Selection;
 use crate::model::{OutcomeKind, short_rev};
-use crate::ui::fmt_age;
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
+use crate::ui::{fmt_age, json};
 
 pub fn run(ctx: &mut Ctx, args: &ListArgs) -> Result<ExitCode, Error> {
     let conn = ctx.open_db()?;
@@ -31,6 +31,20 @@ pub fn run(ctx: &mut Ctx, args: &ListArgs) -> Result<ExitCode, Error> {
             ..Default::default()
         },
     )?;
+    if args.format == Format::Json {
+        let roots = roots_by_id(&conn)?;
+        let items = entries
+            .iter()
+            .map(|e| {
+                Ok(json::repo(
+                    e,
+                    &checkout_path(&roots[&e.repo.root_id], &e.repo)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        print_json(ui, &serde_json::Value::Array(items))?;
+        return Ok(ExitCode::SUCCESS);
+    }
     if entries.is_empty() {
         if args.tags.is_empty() && args.root.is_none() {
             ui.progress("no repositories registered; add one with: vuta add <url>");

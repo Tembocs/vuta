@@ -31,6 +31,9 @@ pub struct HookContext<'a> {
     pub repo_name: &'a str,
     pub path: &'a Path,
     pub outcome: &'a Outcome,
+    /// Send the hook's stdout to stderr, so stdout carries only Vuta's own
+    /// output (`--format json`).
+    pub stdout_to_stderr: bool,
 }
 
 /// Progress reported to the caller, which prints it.
@@ -64,7 +67,11 @@ pub fn run(
         ran_any = true;
         on_event(HookEvent::Started { hook });
         let started = Instant::now();
-        let status = proc::shell_command(&hook.command)
+        let mut cmd = proc::shell_command(&hook.command);
+        if ctx.stdout_to_stderr {
+            cmd.stdout(Stdio::from(std::io::stderr()));
+        }
+        let status = cmd
             .current_dir(ctx.path)
             .env("VUTA_REPO_NAME", ctx.repo_name)
             .env("VUTA_REPO_PATH", ctx.path)
@@ -201,6 +208,7 @@ mod tests {
             repo_name: "v",
             path: dir.path(),
             outcome: &updated(),
+            stdout_to_stderr: false,
         };
         let mut events = Vec::new();
         let outcome = run(&ctx, &hooks, false, &AtomicBool::new(false), |e| {
@@ -231,6 +239,7 @@ mod tests {
             repo_name: "v",
             path: dir.path(),
             outcome: &updated(),
+            stdout_to_stderr: false,
         };
         let mut ends = Vec::new();
         let outcome = run(&ctx, &hooks, false, &AtomicBool::new(false), |e| {
@@ -256,6 +265,7 @@ mod tests {
             repo_name: "v",
             path: dir.path(),
             outcome: &up_to_date(),
+            stdout_to_stderr: false,
         };
         assert_eq!(
             run(&ctx, &hooks, false, &AtomicBool::new(false), |_| {}),

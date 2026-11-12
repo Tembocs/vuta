@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 
-use super::{DbError, unique_violation};
+use super::{DbError, atomic, unique_violation};
 use crate::model::{LastSync, Repo, RepoEntry, VcsKind};
 
 /// A repository to register.
@@ -80,8 +80,8 @@ fn conflict(err: rusqlite::Error, name: &str, rel_path: &str) -> DbError {
 
 /// Register a repository with its tags.
 pub fn insert(conn: &Connection, new: &NewRepo) -> Result<Repo, DbError> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
+    let id = atomic::<_, DbError>(conn, |tx| {
+        tx.execute(
         "INSERT INTO repos (name, root_id, rel_path, vcs, url, branch, clone_filter, clone_depth)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
@@ -96,9 +96,10 @@ pub fn insert(conn: &Connection, new: &NewRepo) -> Result<Repo, DbError> {
         ],
     )
     .map_err(|err| conflict(err, new.name, new.rel_path))?;
-    let id = tx.last_insert_rowid();
-    add_tags(&tx, id, new.tags)?;
-    tx.commit()?;
+        let id = tx.last_insert_rowid();
+        add_tags(tx, id, new.tags)?;
+        Ok(id)
+    })?;
     Ok(Repo {
         id,
         name: new.name.to_owned(),

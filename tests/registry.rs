@@ -605,3 +605,85 @@ fn status_reads_local_state_without_fetching() {
 
     env.code(3, &["status", "nope"]);
 }
+
+fn json(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON ({e}):\n{text}"))
+}
+
+#[test]
+fn list_as_json() {
+    let env = Env::with_root();
+    assert_eq!(
+        json(&env.ok(&["list", "--format", "json"])),
+        serde_json::json!([])
+    );
+    env.ok(&[
+        "add",
+        ZED,
+        "rust/zed",
+        "-t",
+        "rust",
+        "--branch",
+        "main",
+        "--no-clone",
+    ]);
+    env.ok(&["add", V, "--no-clone"]);
+    env.ok(&["set", "v", "--disable"]);
+
+    let list = json(&env.ok(&["list", "--format", "json"]));
+    let items = list.as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    let zed = &items[1];
+    assert_eq!(zed["name"], "zed");
+    assert_eq!(zed["root"], "src");
+    assert_eq!(zed["rel_path"], "rust/zed");
+    assert_eq!(zed["url"], ZED);
+    assert_eq!(zed["branch"], "main");
+    assert_eq!(zed["tags"], serde_json::json!(["rust"]));
+    assert_eq!(zed["last_rev"], serde_json::Value::Null);
+    assert_eq!(
+        std::path::Path::new(zed["path"].as_str().unwrap()),
+        env.checkout("rust/zed")
+    );
+    assert_eq!(items[0]["enabled"], false);
+
+    let rust = json(&env.ok(&["list", "--tag", "rust", "--format", "json"]));
+    assert_eq!(rust.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn status_as_json() {
+    let env = Env::with_root();
+    let mut fixture = Fixture::new();
+    let url = fixture.url();
+    env.ok(&["add", &url, "--name", "clean"]);
+    env.ok(&["add", &url, "--name", "dirty"]);
+    env.ok(&["add", &url, "--name", "missing", "--no-clone"]);
+    std::fs::write(env.checkout("dirty").join("file.txt"), "edit").unwrap();
+    fixture.push_commit();
+    env.ok(&["sync", "clean", "--fetch-only"]);
+
+    let status = json(&env.ok(&["status", "--format", "json"]));
+    let by_name = |name: &str| {
+        status
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let clean = by_name("clean");
+    assert_eq!(clean["state"], "branch");
+    assert_eq!(clean["branch"], "main");
+    assert_eq!(
+        (clean["dirty"].clone(), clean["behind"].clone()),
+        (false.into(), 1.into())
+    );
+    assert_eq!(clean["has_upstream"], true);
+    assert_eq!(clean["rev"].as_str().unwrap().len(), 40);
+    assert_eq!(by_name("dirty")["dirty"], true);
+    let missing = by_name("missing");
+    assert_eq!(missing["state"], "not_cloned");
+    assert_eq!(missing["rev"], serde_json::Value::Null);
+}

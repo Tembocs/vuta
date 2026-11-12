@@ -110,6 +110,33 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Run `f` as one unit: everything it writes is kept, or nothing is.
+///
+/// Uses a SAVEPOINT, which starts a transaction when none is open and
+/// nests inside one otherwise. So functions that use `atomic` compose: an
+/// outer `atomic` around several of them makes the whole sequence atomic,
+/// as `vuta import` does.
+pub fn atomic<T, E: From<DbError>>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> Result<T, E>,
+) -> Result<T, E> {
+    conn.execute_batch("SAVEPOINT vuta_atomic")
+        .map_err(DbError::from)?;
+    match f(conn) {
+        Ok(value) => {
+            conn.execute_batch("RELEASE vuta_atomic")
+                .map_err(DbError::from)?;
+            Ok(value)
+        }
+        Err(err) => {
+            // Undo this unit's writes, then close it. If the rollback itself
+            // fails the connection is unusable anyway; report the cause.
+            let _ = conn.execute_batch("ROLLBACK TO vuta_atomic; RELEASE vuta_atomic");
+            Err(err)
+        }
+    }
+}
+
 /// The message of a UNIQUE constraint failure, such as
 /// `UNIQUE constraint failed: repos.name`, or `None` for any other error.
 fn unique_violation(err: &rusqlite::Error) -> Option<&str> {
@@ -207,6 +234,36 @@ pub(crate) mod tests {
         let conn = open(&path).unwrap();
         assert_eq!(tables(&conn), before);
         assert_eq!(schema_version(&conn).unwrap(), known_version());
+    }
+
+    fn count_roots(conn: &Connection) -> u32 {
+        conn.query_row("SELECT COUNT(*) FROM roots", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn atomic_units_nest_and_roll_back_together() {
+        let (_dir, conn) = fresh();
+        let insert = |conn: &Connection, name: &str| -> Result<(), DbError> {
+            conn.execute("INSERT INTO roots (name, path) VALUES (?1, ?1)", [name])?;
+            Ok(())
+        };
+        // An inner unit that succeeds is undone when the outer one fails.
+        let result: Result<(), DbError> = atomic(&conn, |conn| {
+            atomic(conn, |conn| insert(conn, "a"))?;
+            insert(conn, "a") // duplicate name: fails
+        });
+        assert!(result.is_err());
+        assert_eq!(count_roots(&conn), 0);
+
+        // An inner unit that fails is undone on its own.
+        atomic(&conn, |conn| {
+            insert(conn, "b")?;
+            assert!(atomic(conn, |conn| insert(conn, "b")).is_err());
+            insert(conn, "c")
+        })
+        .unwrap();
+        assert_eq!(count_roots(&conn), 2);
     }
 
     #[test]

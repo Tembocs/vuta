@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use super::DbError;
+use super::{DbError, atomic};
 use crate::model::{HookOutcome, Outcome, Run, RunResult, RunSummary, Tally};
 
 const RUN_COLUMNS: &str = "r.id, r.started_at, r.finished_at, r.vuta_version, r.args, r.exit_code";
@@ -83,32 +83,32 @@ pub fn record_result(
     let new_rev = outcome.rev();
     let duration_ms = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
 
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "INSERT INTO run_results
+    atomic(conn, |tx| {
+        tx.execute(
+            "INSERT INTO run_results
              (run_id, repo_id, outcome, reason, old_rev, new_rev, commits, duration_ms, message)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![
-            run_id,
-            repo_id,
-            outcome.kind(),
-            reason,
-            old_rev,
-            new_rev,
-            commits,
-            duration_ms,
-            message
-        ],
-    )?;
-    let id = tx.last_insert_rowid();
-    tx.execute(
-        "UPDATE repos SET last_rev = COALESCE(?1, last_rev), last_outcome = ?2,
+            params![
+                run_id,
+                repo_id,
+                outcome.kind(),
+                reason,
+                old_rev,
+                new_rev,
+                commits,
+                duration_ms,
+                message
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "UPDATE repos SET last_rev = COALESCE(?1, last_rev), last_outcome = ?2,
                           last_synced_at = unixepoch()
          WHERE id = ?3",
-        params![new_rev, outcome.kind(), repo_id],
-    )?;
-    tx.commit()?;
-    Ok(id)
+            params![new_rev, outcome.kind(), repo_id],
+        )?;
+        Ok(id)
+    })
 }
 
 /// Record how a repository's hooks went.

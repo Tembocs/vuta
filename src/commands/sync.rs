@@ -11,20 +11,21 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use rusqlite::Connection;
+use serde_json::json;
 
-use super::{Ctx, checkout_path, location, repo_by_name, root_by_name};
+use super::{Ctx, checkout_path, location, print_json, repo_by_name, root_by_name, roots_by_id};
 use crate::Error;
-use crate::cli::SyncArgs;
+use crate::cli::{Format, SyncArgs};
 use crate::db;
 use crate::db::repos::Selection;
-use crate::model::{HookOutcome, Outcome, RepoEntry, Root, Tally};
+use crate::model::{HookOutcome, Outcome, RepoEntry, Tally};
 use crate::paths;
 use crate::sync::hooks::{self, HookContext, HookEvent};
 use crate::sync::{self, Event, Job};
 use crate::ui::report::ResultLine;
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
-use crate::ui::{Ui, Verbosity};
+use crate::ui::{Ui, Verbosity, json as ui_json};
 
 /// Which hooks a run starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,9 @@ pub struct Plan {
     /// Print the "Syncing N repositories" header and the summary line.
     /// `vuta add` prints only the result line.
     pub framed: bool,
+    /// With JSON, stdout gets one object when the run ends and nothing
+    /// else; hook output goes to stderr.
+    pub format: Format,
 }
 
 pub fn run(ctx: &mut Ctx, args: &SyncArgs) -> Result<ExitCode, Error> {
@@ -74,6 +78,18 @@ pub fn run(ctx: &mut Ctx, args: &SyncArgs) -> Result<ExitCode, Error> {
     )?;
     if entries.is_empty() {
         ui.progress("nothing to sync");
+        if args.format == Format::Json {
+            print_json(
+                ui,
+                &json!({
+                    "run": null,
+                    "interrupted": false,
+                    "elapsed_ms": 0,
+                    "tally": ui_json::tally(&Tally::default()),
+                    "results": [],
+                }),
+            )?;
+        }
         return Ok(ExitCode::SUCCESS);
     }
     let workers = match args.jobs {
@@ -85,7 +101,7 @@ pub fn run(ctx: &mut Ctx, args: &SyncArgs) -> Result<ExitCode, Error> {
         .clamp(1, entries.len());
 
     if args.dry_run {
-        return dry_run(ui, &conn, &entries, workers, args.fetch_only);
+        return dry_run(ui, &conn, &entries, workers, args.fetch_only, args.format);
     }
 
     let _lock = sync::acquire_lock(&paths::lock_path(&ctx.db_path))?;
@@ -106,6 +122,7 @@ pub fn run(ctx: &mut Ctx, args: &SyncArgs) -> Result<ExitCode, Error> {
             hooks,
             strict: args.strict,
             framed: true,
+            format: args.format,
         },
     )
 }
@@ -118,8 +135,33 @@ fn dry_run(
     entries: &[RepoEntry],
     workers: usize,
     fetch_only: bool,
+    format: Format,
 ) -> Result<ExitCode, Error> {
     let roots = roots_by_id(conn)?;
+    let action = |enabled: bool, path: &std::path::Path| {
+        if !enabled {
+            "skip"
+        } else if path.exists() {
+            "fetch"
+        } else {
+            "clone"
+        }
+    };
+    if format == Format::Json {
+        let mut items = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let repo = &entry.repo;
+            let path = checkout_path(&roots[&repo.root_id], repo)?;
+            items.push(json!({
+                "name": repo.name,
+                "action": action(repo.enabled, &path),
+                "path": ui_json::path_text(&path),
+                "url": repo.url,
+            }));
+        }
+        print_json(ui, &serde_json::Value::Array(items))?;
+        return Ok(ExitCode::SUCCESS);
+    }
     ui.progress(format_args!(
         "Would sync {}, {workers} at a time{}",
         repositories(entries.len()),
@@ -131,12 +173,11 @@ fn dry_run(
         let repo = &entry.repo;
         let root = &roots[&repo.root_id];
         let path = checkout_path(root, repo)?;
-        let (action, style) = if !repo.enabled {
-            ("skip", THEME.warn)
-        } else if path.exists() {
-            ("fetch", THEME.ok)
-        } else {
-            ("clone", THEME.new)
+        let action = action(repo.enabled, &path);
+        let style = match action {
+            "skip" => THEME.warn,
+            "fetch" => THEME.ok,
+            _ => THEME.new,
         };
         table.push(vec![
             Cell::new(action, style),
@@ -165,6 +206,7 @@ struct Finished {
 pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error> {
     let stop = sync::interrupt_flag()?;
     let started = Instant::now();
+    let text = plan.format == Format::Text;
     let roots = roots_by_id(conn)?;
     let mut names = HashMap::new();
     let mut paths = HashMap::new();
@@ -189,7 +231,9 @@ pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error
             "Syncing {}, {workers} at a time",
             repositories(total)
         ));
-        ui.blank();
+        if text {
+            ui.blank();
+        }
     }
 
     // Record.
@@ -215,14 +259,16 @@ pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error
             duration,
         } => {
             tally.add(outcome.kind());
-            ui.sync_result(&ResultLine {
-                index: tally.total() as usize,
-                total,
-                name: &names[&repo_id],
-                name_width,
-                outcome: &outcome,
-                duration,
-            });
+            if text {
+                ui.sync_result(&ResultLine {
+                    index: tally.total() as usize,
+                    total,
+                    name: &names[&repo_id],
+                    name_width,
+                    outcome: &outcome,
+                    duration,
+                });
+            }
             match db::runs::record_result(conn, run_id, repo_id, &outcome, duration) {
                 Ok(result_id) => finished.push(Finished {
                     repo_id,
@@ -259,19 +305,23 @@ pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error
                     .any(|h| hooks::should_run(h, &done.outcome, force))
             {
                 heading = true;
-                ui.blank();
-                ui.hooks_heading();
+                if text {
+                    ui.blank();
+                    ui.hooks_heading();
+                }
             }
             let ctx = HookContext {
                 repo_name: &done.name,
                 path: &done.path,
                 outcome: &done.outcome,
+                stdout_to_stderr: !text,
             };
             hooks::run(&ctx, &hooks, force, stop, |event| match event {
-                HookEvent::Started { hook } => ui.hook_started(&done.name, &hook.command),
-                HookEvent::Finished { end, duration, .. } => {
+                HookEvent::Started { hook } if text => ui.hook_started(&done.name, &hook.command),
+                HookEvent::Finished { end, duration, .. } if text => {
                     ui.hook_finished(&done.name, end, duration)
                 }
+                _ => {}
             })
         };
         if outcome == HookOutcome::Failed {
@@ -285,9 +335,26 @@ pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error
     let code = sync::exit_code(&tally, plan.strict, interrupted);
     db::runs::finish(conn, run_id, code.into())?;
     db::runs::prune(conn, db::settings::history_keep_runs(conn)?)?;
-    if plan.framed {
+    if plan.framed && text {
         ui.blank();
         ui.summary(&tally, started.elapsed());
+    }
+    if !text {
+        let run = db::runs::by_id(conn, run_id)?.map(|run| ui_json::run(&run));
+        let results: Vec<_> = db::runs::results_for_run(conn, run_id)?
+            .iter()
+            .map(ui_json::result)
+            .collect();
+        print_json(
+            ui,
+            &json!({
+                "run": run,
+                "interrupted": interrupted,
+                "elapsed_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "tally": ui_json::tally(&tally),
+                "results": results,
+            }),
+        )?;
     }
     if interrupted {
         let skipped = total - finished.len();
@@ -301,13 +368,6 @@ pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error
         }
     }
     Ok(ExitCode::from(code))
-}
-
-fn roots_by_id(conn: &Connection) -> Result<HashMap<i64, Root>, Error> {
-    Ok(db::roots::all(conn)?
-        .into_iter()
-        .map(|root| (root.id, root))
-        .collect())
 }
 
 /// `1 repository`, `9 repositories`.

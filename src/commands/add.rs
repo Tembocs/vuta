@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use super::sync::{HookMode, Plan};
 use super::{Ctx, check_label, location, rel_path, root_or_default, stored_url};
 use crate::Error;
-use crate::cli::AddArgs;
+use crate::cli::{AddArgs, Format};
 use crate::db;
 use crate::db::repos::{NewRepo, Selection};
 use crate::model::VcsKind;
@@ -96,6 +96,7 @@ pub fn run(ctx: &mut Ctx, args: &AddArgs) -> Result<ExitCode, Error> {
             hooks: HookMode::Normal,
             strict: false,
             framed: false,
+            format: Format::Text,
         },
     )
 }

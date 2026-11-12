@@ -4,6 +4,7 @@
 //! go to stderr. Everything is written through `anstream`, which strips
 //! colour when it is off, so callers always write styled text.
 
+pub mod json;
 pub mod report;
 pub mod table;
 pub mod theme;
@@ -88,6 +89,13 @@ impl Ui {
         let mut out = std::io::stdout().lock();
         out.write_all(text.as_bytes())?;
         out.flush()
+    }
+
+    /// One JSON value on stdout, pretty-printed, at every verbosity.
+    pub fn json(&self, value: &serde_json::Value) -> std::io::Result<()> {
+        let mut text = serde_json::to_string_pretty(value).map_err(std::io::Error::other)?;
+        text.push('\n');
+        self.verbatim(&text)
     }
 
     /// An empty line on stdout, except in quiet mode.

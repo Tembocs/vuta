@@ -331,3 +331,22 @@ fn interrupt_exits_130_with_a_closed_run() {
     assert_eq!(run.exit_code, Some(130));
     assert!(run.finished_at.is_some());
 }
+
+#[test]
+fn json_sync_sends_hook_output_to_stderr() {
+    let env = Env::with_root();
+    let fixture = Fixture::new();
+    register(&env, &fixture, "alpha");
+    env.ok(&["hook", "add", "alpha", "echo HOOK-MARKER"]);
+
+    let out = env.code(0, &["sync", "--format", "json"]);
+    let text = stdout(&out);
+    let doc: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON ({e}):\n{text}"));
+    assert_eq!(doc["results"][0]["hook_outcome"], "ok");
+    assert!(
+        !text.contains("HOOK-MARKER") && !text.contains("Hooks"),
+        "{text}"
+    );
+    assert!(stderr(&out).contains("HOOK-MARKER"), "{}", stderr(&out));
+}

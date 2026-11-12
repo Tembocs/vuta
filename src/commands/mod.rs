@@ -163,6 +163,20 @@ pub fn stored_url(url: &str) -> Result<String, Error> {
     Ok(url.to_owned())
 }
 
+/// Print one JSON value on stdout.
+pub fn print_json(ui: &Ui, value: &serde_json::Value) -> Result<(), Error> {
+    ui.json(value)
+        .map_err(|err| anyhow!("cannot write the JSON output: {err}").into())
+}
+
+/// Every root by id, for turning repositories into checkout paths.
+pub fn roots_by_id(conn: &Connection) -> Result<std::collections::HashMap<i64, Root>, Error> {
+    Ok(crate::db::roots::all(conn)?
+        .into_iter()
+        .map(|root| (root.id, root))
+        .collect())
+}
+
 /// A tracer that prints each git command with `--verbose`, or `None`.
 pub fn tracer(ui: &Ui) -> Option<Tracer> {
     (ui.verbosity() == Verbosity::Verbose).then(|| {

@@ -27,7 +27,7 @@ Vuta ("pull" in Swahili) is a single-binary Rust CLI that keeps a set of source 
 - Mercurial, Subversion and other VCS backends.
 - Config files, and import or export of the registry.
 - Anything that writes to a remote: commit, push, tag.
-- Submodule management, progress bars and JSON output.
+- Submodule management and progress bars.
 
 Section 13 says where each of these plugs in later.
 
@@ -77,7 +77,8 @@ vuta/
 │       ├── mod.rs             Ui handle: stdout, stderr, verbosity
 │       ├── theme.rs           semantic styles and glyphs
 │       ├── table.rs           column alignment
-│       └── report.rs          sync result lines and the summary
+│       ├── report.rs          sync result lines and the summary
+│       └── json.rs            the shapes of --format json
 └── tests/
     ├── common/mod.rs          temp dirs, local bare repos, vuta command builder
     ├── cli.rs                 global flags, db path, doctor, exit codes
@@ -106,7 +107,7 @@ Arrows point from caller to callee. `sync` reaches Git only through `vcs`, and i
 
 ## 3. Dependencies
 
-Nine runtime crates, all checked against crates.io on 12 Nov 2026. The minimum Rust version is 1.89 because `rusqlite` 0.42 requires it and the sync lock uses `File::try_lock`.
+Eleven runtime crates, all checked against crates.io on 12 Nov 2026. The minimum Rust version is 1.89 because `rusqlite` 0.42 requires it and the sync lock uses `File::try_lock`.
 
 ```toml
 [package]
@@ -127,6 +128,8 @@ anstream = "1"
 anstyle = "1"
 thiserror = "2"
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ctrlc = { version = "3.5", features = ["termination"] }
 
 [dev-dependencies]
@@ -147,6 +150,7 @@ strip = true
 | `anstream`, `anstyle` | Colour output. clap already depends on both, so they add nothing to the build. Section 9 covers their use. |
 | `thiserror` | The typed `Error` enum that maps to exit codes. |
 | `anyhow` | Error context inside commands, where the exact type does not matter. |
+| `serde`, `serde_json` | `--format json` output, and the registry file of `vuta export` and `vuta import`. |
 | `ctrlc` | Ctrl-C handling on both platforms. `termination` adds SIGTERM. |
 | `assert_cmd`, `tempfile` | Integration tests that run the real binary against throwaway directories. |
 
@@ -318,6 +322,7 @@ CREATE TABLE settings (
 - **Moving a partition.** `vuta root move <name> <new-path>` updates one row and every repository under it follows.
 - **Names.** Repository, root and tag names compare case-insensitively, so `vuta sync Zed` and `vuta sync zed` are the same.
 - **Time.** All timestamps are Unix seconds in UTC.
+- **Atomic units.** `db::atomic` runs a closure inside a SAVEPOINT. Functions that write several rows (`roots::add`, `repos::insert`, `runs::record_result`) use it, and because savepoints nest, a caller can wrap several of them in one more `atomic` to make the whole sequence all-or-nothing.
 - **History size.** After each sync, runs older than the newest `history.keep_runs` are deleted. Their results go with them by cascade.
 
 ## 5. Domain model and the VCS abstraction
@@ -829,6 +834,29 @@ zed        rust   rust/zed     8be04d7   2 hours ago
 - A repository whose last result was skipped or failed shows its SYNCED cell in yellow or red.
 - A disabled repository is dim across the whole row.
 
+### JSON output
+
+`vuta list`, `status`, `log` and `sync` take `--format json`. Each then prints exactly one JSON value on stdout and no text there. Progress, warnings and errors stay on stderr. During `sync`, hooks' stdout is sent to stderr as well, so stdout always parses. `ui/json.rs` defines every shape in one place, built explicitly so that changing a model type cannot change the output by accident.
+
+- **Conventions.** Keys are `snake_case`. A field without a value is `null`, never missing. Revisions are full hashes. Times are Unix seconds and durations milliseconds. Enumerations use the strings stored in the database (`up_to_date`, `fast_forward`). New fields may be added; existing ones keep their name and meaning.
+- **A command that fails to start** (exit 3) prints only its `error:` line on stderr, and nothing on stdout.
+
+| Command | stdout |
+| --- | --- |
+| `list` | An array of repositories: `name`, `root`, `rel_path`, `path` (absolute), `vcs`, `url`, `branch`, `clone_filter`, `clone_depth`, `enabled`, `tags`, `last_rev`, `last_outcome`, `last_synced_at` |
+| `status` | An array: `name`, `enabled`, `path`, `state` (`not_cloned`, `not_a_checkout`, `no_origin`, `remote_mismatch`, `unborn`, `detached`, `branch` or `error`), `branch`, `rev`, `dirty`, `ahead`, `behind`, `has_upstream`, `origin` (the URL found, for `remote_mismatch`) and `message` (for `error`) |
+| `log` | An array of runs, newest first: `id`, `started_at`, `finished_at`, `exit_code`, `args`, `vuta_version`, `tally` and every `results` entry |
+| `log <name>` | An array of that repository's results, newest first |
+| `sync` | An object: `run` (as in `log`, without results), `interrupted`, `elapsed_ms`, `tally` and `results`. `run` is `null` when nothing was selected. |
+| `sync --dry-run` | An array: `name`, `action` (`clone`, `fetch` or `skip`), `path`, `url` |
+
+A result is `run_id`, `repo`, `outcome`, `reason`, `old_rev`, `new_rev`, `commits`, `duration_ms`, `hook_outcome` and `message`, exactly as stored in `run_results`. `sync` reads its results back from the database after recording them, so it and `log` cannot disagree. A tally is `cloned`, `updated`, `up_to_date`, `skipped`, `failed` and `hooks_failed`.
+
+```sh
+vuta sync --format json | jq -r '.results[] | select(.outcome == "failed") | .repo'
+vuta status --format json | jq -r '.[] | select(.behind > 0) | .name'
+```
+
 ### Rules for `ui`
 
 - **Results go to stdout; progress, warnings and errors go to stderr.** `vuta list | grep rust` sees only the table.
@@ -890,6 +918,7 @@ Tests never touch the network: every "remote" is a bare Git repository in a temp
 | `paths.rs` | Joining a root with `rel_path`, `/` to `\` conversion, rejecting `..` and absolute `rel_path` values |
 | `db` | Migrations apply to an in-memory database, a second `open` changes nothing, and a too-new `user_version` is refused |
 | `ui/table.rs` | Column widths are identical with colour on and off |
+| `ui/json.rs` | Missing values are `null`, and enumerations use their stored strings |
 | `ui/report.rs` | Each `Outcome` renders the expected line, and with colour off the output contains no escape bytes |
 
 ### Integration tests (`tests/`)
@@ -980,7 +1009,7 @@ Each item below is left out of v1 on purpose, and each has a known place to plug
 | --- | --- |
 | Mercurial, Subversion, Fossil, Jujutsu | A new file in `vcs/` implementing `Vcs`, a new `VcsKind` variant, and a migration that widens the `repos.vcs` CHECK. `scan` gains detection of `.hg`, `.svn` and so on. The sync engine does not change. |
 | Registry export and import | `vuta export` and `vuta import` as a transfer format between machines. The database stays the source of truth. |
-| JSON output | A `--format json` flag handled inside `ui`, since `ui` is already the only writer. |
+| JSON output | Done for `list`, `status`, `log` and `sync` (section 9). Other commands can adopt `--format` the same way. |
 | Submodules | A per-repository `submodules` column and one extra step after a fast-forward. |
 | Other update strategies | A per-repository `strategy` column (`ff-only`, `rebase`) read by `sync/worker.rs`. |
 | Live progress | Spinner lines per worker, drawn by `ui` from the `Started` and `Finished` events it already receives. |

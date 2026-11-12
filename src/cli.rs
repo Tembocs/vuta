@@ -61,6 +61,16 @@ impl Cli {
     }
 }
 
+/// How `list`, `status`, `log` and `sync` print their results.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    /// Aligned, coloured text for people
+    #[default]
+    Text,
+    /// One JSON value on stdout, for scripts
+    Json,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ColorWhen {
     #[default]
@@ -235,6 +245,9 @@ pub struct SyncArgs {
     /// Print what would be cloned or fetched, and exit
     #[arg(long)]
     pub dry_run: bool,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
 }
 
 #[derive(Debug, Args)]
@@ -245,6 +258,9 @@ pub struct ListArgs {
     /// Only repositories under this root
     #[arg(long, value_name = "ROOT")]
     pub root: Option<String>,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
 }
 
 #[derive(Debug, Args)]
@@ -257,6 +273,9 @@ pub struct StatusArgs {
     /// Only repositories under this root
     #[arg(long, value_name = "ROOT")]
     pub root: Option<String>,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
 }
 
 #[derive(Debug, Args)]
@@ -371,6 +390,9 @@ pub struct LogArgs {
     #[arg(short = 'n', long, value_name = "N", default_value_t = 10,
           value_parser = clap::value_parser!(u32).range(1..))]
     pub limit: u32,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
 }
 
 #[derive(Debug, Subcommand)]

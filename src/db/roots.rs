@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use super::{DbError, path_text, unique_violation};
+use super::{DbError, atomic, path_text, unique_violation};
 use crate::model::Root;
 
 const COLUMNS: &str = "id, name, path, is_default";
@@ -68,25 +68,25 @@ pub fn add(
     make_default: bool,
 ) -> Result<Root, DbError> {
     let text = path_text(path)?;
-    let tx = conn.unchecked_transaction()?;
-    let existing: u32 = tx.query_row("SELECT COUNT(*) FROM roots", [], |row| row.get(0))?;
-    let is_default = make_default || existing == 0;
-    if is_default {
-        tx.execute("UPDATE roots SET is_default = 0 WHERE is_default = 1", [])?;
-    }
-    tx.execute(
-        "INSERT INTO roots (name, path, is_default) VALUES (?1, ?2, ?3)",
-        params![name, text, is_default],
-    )
-    .map_err(|err| match unique_violation(&err) {
-        Some(msg) if msg.contains("roots.name") => {
-            DbError::Conflict(format!("a root named '{name}' already exists"))
+    let (id, is_default) = atomic::<_, DbError>(conn, |tx| {
+        let existing: u32 = tx.query_row("SELECT COUNT(*) FROM roots", [], |row| row.get(0))?;
+        let is_default = make_default || existing == 0;
+        if is_default {
+            tx.execute("UPDATE roots SET is_default = 0 WHERE is_default = 1", [])?;
         }
-        Some(_) => DbError::Conflict(format!("a root at {text} already exists")),
-        None => err.into(),
+        tx.execute(
+            "INSERT INTO roots (name, path, is_default) VALUES (?1, ?2, ?3)",
+            params![name, text, is_default],
+        )
+        .map_err(|err| match unique_violation(&err) {
+            Some(msg) if msg.contains("roots.name") => {
+                DbError::Conflict(format!("a root named '{name}' already exists"))
+            }
+            Some(_) => DbError::Conflict(format!("a root at {text} already exists")),
+            None => err.into(),
+        })?;
+        Ok((tx.last_insert_rowid(), is_default))
     })?;
-    let id = tx.last_insert_rowid();
-    tx.commit()?;
     Ok(Root {
         id,
         name: name.to_owned(),
@@ -97,11 +97,11 @@ pub fn add(
 
 /// Make this root the default and clear the flag on every other root.
 pub fn set_default(conn: &Connection, id: i64) -> Result<(), DbError> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute("UPDATE roots SET is_default = 0 WHERE is_default = 1", [])?;
-    tx.execute("UPDATE roots SET is_default = 1 WHERE id = ?1", [id])?;
-    tx.commit()?;
-    Ok(())
+    atomic(conn, |tx| {
+        tx.execute("UPDATE roots SET is_default = 0 WHERE is_default = 1", [])?;
+        tx.execute("UPDATE roots SET is_default = 1 WHERE id = ?1", [id])?;
+        Ok(())
+    })
 }
 
 /// Point a root at a new location. Every repository under it follows.
