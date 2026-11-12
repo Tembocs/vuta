@@ -38,6 +38,9 @@ jobs:
           sudo apt-get install -y "./$deb"
           vuta --version
           vuta --db "$RUNNER_TEMP/vuta.db" doctor
+          test -s /usr/share/bash-completion/completions/vuta
+          test -s /usr/share/zsh/vendor-completions/_vuta
+          test -s /usr/share/fish/vendor_completions.d/vuta.fish
       - name: MSIX package
         if: runner.os == 'Windows'
         shell: powershell

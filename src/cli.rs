@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use clap::builder::styling::{AnsiColor, Styles};
 use clap::builder::{PossibleValuesParser, TypedValueParser};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum, ValueHint};
+use clap_complete::Shell;
 
 use crate::model::Platform;
 use crate::ui::Verbosity;
@@ -23,7 +24,7 @@ const HELP_STYLES: Styles = Styles::styled()
 #[command(name = "vuta", version, about, styles = HELP_STYLES, propagate_version = true)]
 pub struct Cli {
     /// Use this database file instead of the platform default
-    #[arg(long, global = true, env = "VUTA_DB", value_name = "PATH")]
+    #[arg(long, global = true, env = "VUTA_DB", value_name = "PATH", value_hint = ValueHint::FilePath)]
     pub db: Option<PathBuf>,
 
     /// When to colour output
@@ -114,6 +115,13 @@ pub enum Command {
     #[command(subcommand)]
     Config(ConfigCommand),
 
+    /// Print a shell completion script, for example: vuta completions bash
+    Completions {
+        /// The shell to complete for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+
     /// Inspect the database
     #[command(subcommand)]
     Db(DbCommand),
@@ -127,6 +135,7 @@ pub enum RootCommand {
     /// Register a base directory. The first root becomes the default.
     Add {
         name: String,
+        #[arg(value_hint = ValueHint::DirPath)]
         path: PathBuf,
         /// Make this the default root
         #[arg(long)]
@@ -138,7 +147,11 @@ pub enum RootCommand {
     /// Change the default root
     Default { name: String },
     /// Point a root at a new location. No files are moved.
-    Move { name: String, new_path: PathBuf },
+    Move {
+        name: String,
+        #[arg(value_hint = ValueHint::DirPath)]
+        new_path: PathBuf,
+    },
     /// Remove a root that holds no repositories
     #[command(visible_alias = "rm")]
     Remove { name: String },
@@ -147,6 +160,7 @@ pub enum RootCommand {
 #[derive(Debug, Args)]
 pub struct AddArgs {
     /// The remote to clone from
+    #[arg(value_hint = ValueHint::Url)]
     pub url: String,
     /// Where to put the checkout, relative to the root [default: the name]
     pub path: Option<String>,
@@ -176,6 +190,7 @@ pub struct AddArgs {
 #[derive(Debug, Args)]
 pub struct ScanArgs {
     /// Directory to search [default: the root's path]
+    #[arg(value_hint = ValueHint::DirPath)]
     pub dir: Option<PathBuf>,
     /// Register under this root [default: the root that contains each checkout]
     #[arg(long, value_name = "ROOT")]
@@ -257,7 +272,7 @@ pub struct SetArgs {
     #[arg(long = "name", value_name = "NEW_NAME", group = "change")]
     pub new_name: Option<String>,
     /// Change the remote URL
-    #[arg(long, group = "change")]
+    #[arg(long, group = "change", value_hint = ValueHint::Url)]
     pub url: Option<String>,
     /// Clone this branch
     #[arg(long, group = "change", conflicts_with = "default_branch")]
@@ -326,6 +341,7 @@ pub enum HookCommand {
     /// Attach a shell command that runs after the repository syncs
     Add {
         repo: String,
+        #[arg(value_hint = ValueHint::CommandString)]
         command: String,
         /// Run only on this kind of OS
         #[arg(long, default_value = "any", value_parser = platform_parser())]

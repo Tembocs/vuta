@@ -13,6 +13,7 @@ members = ["xtask"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive", "env"] }
+clap_complete = "4.6"
 rusqlite = { version = "0.42", features = ["bundled"] }
 directories = "6"
 anstream = "1"

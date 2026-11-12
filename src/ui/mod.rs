@@ -81,6 +81,15 @@ impl Ui {
         anstream::println!("{line}");
     }
 
+    /// Text on stdout exactly as given, with no newline added, such as a
+    /// generated completion script.
+    pub fn verbatim(&self, text: &str) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        out.write_all(text.as_bytes())?;
+        out.flush()
+    }
+
     /// An empty line on stdout, except in quiet mode.
     pub fn blank(&self) {
         if !self.quiet() {

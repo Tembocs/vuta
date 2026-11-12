@@ -10,3 +10,5 @@ publish = false
 [dependencies]
 anyhow = "1"
 clap = { version = "4.6", features = ["derive"] }
+# For the completion scripts the packages ship.
+vuta = { path = ".." }

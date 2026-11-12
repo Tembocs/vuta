@@ -43,6 +43,18 @@ Global options: `--db <PATH>` (or `VUTA_DB`), `--color auto|always|never` (or `V
 
 Updates are fast-forward only. A checkout with local changes, local commits that diverge from upstream, a detached HEAD, no upstream branch or a different `origin` is skipped and left untouched. `vuta sync` exits 0 when everything succeeded, 1 when a repository or hook failed (or a repository was skipped, with `--strict`), 3 when it could not start, and 130 on Ctrl-C.
 
+### Shell completions
+
+`vuta completions <shell>` prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish`. The Debian package installs the bash, zsh and fish scripts for you. Otherwise:
+
+```sh
+vuta completions bash > ~/.local/share/bash-completion/completions/vuta
+vuta completions zsh > ~/.zfunc/_vuta        # with fpath+=(~/.zfunc) before compinit in ~/.zshrc
+vuta completions fish > ~/.config/fish/completions/vuta.fish
+```
+
+In PowerShell, add `vuta completions powershell | Out-String | Invoke-Expression` to `$PROFILE`.
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT licence](LICENSE-MIT) at your option.

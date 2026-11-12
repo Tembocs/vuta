@@ -4,6 +4,7 @@
 //! map to exit code 3) and render values several commands share.
 
 pub mod add;
+pub mod completions;
 pub mod config;
 pub mod db;
 pub mod doctor;
@@ -57,6 +58,11 @@ impl Ctx<'_> {
 }
 
 pub fn run(cli: &Cli, ui: &mut Ui) -> Result<ExitCode, Error> {
+    // Completions need no database, not even its path, so a shell's init
+    // file can run them anywhere.
+    if let Command::Completions { shell } = &cli.command {
+        return completions::run(ui, *shell);
+    }
     let mut ctx = Ctx {
         ui,
         db_path: paths::resolve_db_path(cli.db.as_deref())?,
@@ -76,6 +82,7 @@ pub fn run(cli: &Cli, ui: &mut Ui) -> Result<ExitCode, Error> {
         Command::Hook(cmd) => hook::run(ctx, cmd),
         Command::Log(args) => log::run(ctx, args),
         Command::Config(cmd) => config::run(ctx, cmd),
+        Command::Completions { .. } => unreachable!("handled above"),
         Command::Db(DbCommand::Path) => db::path(ctx),
         Command::Doctor => doctor::run(ctx),
     }

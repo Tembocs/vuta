@@ -87,3 +87,71 @@ fn doctor_reports_a_too_new_database() {
     let text = stdout(out.get_output());
     assert!(text.contains("upgrade vuta"), "{text}");
 }
+
+#[test]
+fn completions_print_a_script_without_touching_the_database() {
+    let env = Env::new();
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        let out = env.vuta().args(["completions", shell]).assert().success();
+        let text = stdout(out.get_output());
+        assert!(
+            text.contains("sync") && text.contains("fetch-only"),
+            "{shell}"
+        );
+    }
+    assert!(!env.db().exists());
+    env.vuta().args(["completions", "tcsh"]).assert().code(2);
+}
+
+/// Each script must parse in its own shell. Shells that are not installed
+/// are skipped.
+#[cfg(unix)]
+#[test]
+fn completion_scripts_parse() {
+    let env = Env::new();
+    for (shell, check) in [
+        ("bash", &["-n"][..]),
+        ("zsh", &["-n"]),
+        ("fish", &["--no-execute"]),
+    ] {
+        if std::process::Command::new(shell)
+            .arg("-c")
+            .arg("exit 0")
+            .output()
+            .is_err()
+        {
+            continue;
+        }
+        let script = env.dir.path().join(format!("vuta.{shell}"));
+        let out = env.vuta().args(["completions", shell]).output().unwrap();
+        std::fs::write(&script, out.stdout).unwrap();
+        let status = std::process::Command::new(shell)
+            .args(check)
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{shell} rejects its completion script");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn completion_script_parses_in_powershell() {
+    let env = Env::new();
+    let script = env.dir.path().join("vuta.ps1");
+    let out = env
+        .vuta()
+        .args(["completions", "powershell"])
+        .output()
+        .unwrap();
+    std::fs::write(&script, out.stdout).unwrap();
+    let parse = format!(
+        "$errors = $null; [System.Management.Automation.Language.Parser]::ParseFile('{}', [ref]$null, [ref]$errors) | Out-Null; if ($errors) {{ $errors; exit 1 }}",
+        script.display()
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &parse])
+        .status()
+        .unwrap();
+    assert!(status.success(), "PowerShell rejects its completion script");
+}

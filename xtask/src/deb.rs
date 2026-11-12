@@ -1,8 +1,9 @@
 //! `cargo xtask deb`: a Debian package built with `dpkg-deb`.
 //!
-//! The package installs `/usr/bin/vuta` and `/usr/share/doc/vuta/copyright`,
-//! depends on `git` and on the shared libraries `dpkg-shlibdeps` finds, and
-//! is owned by root whoever builds it.
+//! The package installs `/usr/bin/vuta`, completion scripts for bash, zsh
+//! and fish, and `/usr/share/doc/vuta/copyright`. It depends on `git` and
+//! on the shared libraries `dpkg-shlibdeps` finds, and is owned by root
+//! whoever builds it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+
+use vuta::commands::completions::{self, Shell};
 
 use crate::Common;
 use crate::meta::{self, Meta, Version};
@@ -26,6 +29,13 @@ pub struct DebArgs {
     #[arg(long, default_value_t = 1, value_name = "N")]
     revision: u32,
 }
+
+/// Where Debian's shells look for completion scripts.
+const COMPLETIONS: &[(Shell, &str)] = &[
+    (Shell::Bash, "usr/share/bash-completion/completions/vuta"),
+    (Shell::Zsh, "usr/share/zsh/vendor-completions/_vuta"),
+    (Shell::Fish, "usr/share/fish/vendor_completions.d/vuta.fish"),
+];
 
 /// The long description under the control file's Description line.
 const LONG_DESCRIPTION: &str = "\
@@ -55,6 +65,9 @@ pub fn run(args: &DebArgs) -> Result<PathBuf> {
 
     let bin = staging.join("usr/bin").join(&meta.name);
     install(&binary, &bin, 0o755)?;
+    for (shell, path) in COMPLETIONS {
+        write(&staging.join(path), &completions::script(*shell), 0o644)?;
+    }
     let doc = staging.join("usr/share/doc").join(&meta.name);
     write(&doc.join("copyright"), &copyright(&meta)?, 0o644)?;
 
@@ -376,6 +389,17 @@ mod tests {
                 .all(|l| l.starts_with(' ') && l.len() > 1)
         );
         assert!(text.ends_with('\n') && !text.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn completions_go_where_debian_shells_look() {
+        for (shell, path) in COMPLETIONS {
+            assert!(path.starts_with("usr/share/"), "{path}");
+            assert!(
+                completions::script(*shell).contains("fetch-only"),
+                "{shell}"
+            );
+        }
     }
 
     #[test]
