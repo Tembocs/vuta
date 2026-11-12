@@ -42,7 +42,8 @@ vuta/
 ├── .cargo/config.toml         the `cargo xtask` alias
 ├── docs/
 │   ├── ARCHITECTURE.md        this document, exported as Markdown
-│   └── PACKAGING.md           building .deb and .msix packages
+│   ├── PACKAGING.md           building .deb and .msix packages
+│   └── features_bucket.md     remaining work, planned
 ├── LICENSE-MIT
 ├── LICENSE-APACHE
 ├── .gitignore                 /target
@@ -1025,7 +1026,7 @@ M2 syncs sequentially on purpose. The per-repository logic is where correctness 
 
 ## 13. Deferred
 
-Each item below is left out of v1 on purpose, and each has a known place to plug in.
+Each item below is left out of v1 on purpose, and each has a known place to plug in. [features_bucket.md](features_bucket.md) plans the remaining ones: what each involves, what to decide first, and when it is done.
 
 | Later feature | Where it plugs in |
 | --- | --- |
