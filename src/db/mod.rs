@@ -1,4 +1,8 @@
 //! Opening and migrating the database. Only this module runs SQL.
+//!
+//! The submodules are typed queries, one per table group. Lookups by name
+//! return `Option`; turning a missing name into a user-facing error is the
+//! caller's job.
 
 pub mod hooks;
 pub mod repos;
@@ -9,7 +13,12 @@ pub mod settings;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+use rusqlite::{Connection, ErrorCode};
+
+use crate::model::{
+    FailReason, GlyphMode, HookOutcome, OutcomeKind, Platform, RunWhen, SkipKind, VcsKind,
+};
 
 const MIGRATIONS: &[&str] = &[include_str!("../../migrations/0001_init.sql")];
 
@@ -29,6 +38,21 @@ pub enum DbError {
         "the database is at schema version {found} but this vuta knows only {known}; upgrade vuta"
     )]
     SchemaTooNew { found: u32, known: u32 },
+    /// A uniqueness rule was broken, for example a duplicate name.
+    #[error("{0}")]
+    Conflict(String),
+    #[error("root '{name}' still holds {repos} repositories; remove or move them first")]
+    RootNotEmpty { name: String, repos: u32 },
+    #[error("path {} is not valid UTF-8", .0.display())]
+    NonUtf8Path(PathBuf),
+    #[error("unknown setting '{0}'; see: vuta config list")]
+    UnknownSetting(String),
+    #[error("invalid value '{value}' for {key}: {reason}")]
+    InvalidSetting {
+        key: String,
+        value: String,
+        reason: String,
+    },
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -86,9 +110,64 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     Ok(())
 }
 
+/// The message of a UNIQUE constraint failure, such as
+/// `UNIQUE constraint failed: repos.name`, or `None` for any other error.
+fn unique_violation(err: &rusqlite::Error) -> Option<&str> {
+    match err {
+        rusqlite::Error::SqliteFailure(e, msg)
+            if e.code == ErrorCode::ConstraintViolation
+                && e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+        {
+            Some(msg.as_deref().unwrap_or(""))
+        }
+        _ => None,
+    }
+}
+
+/// A path as stored text. Non-UTF-8 paths are refused rather than mangled.
+fn path_text(path: &Path) -> Result<&str, DbError> {
+    path.to_str()
+        .ok_or_else(|| DbError::NonUtf8Path(path.to_path_buf()))
+}
+
+/// Store and load the model's string enums as their `as_str` text.
+macro_rules! sql_text_enum {
+    ($($ty:ty),+) => {$(
+        impl ToSql for $ty {
+            fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+                Ok(ToSqlOutput::from(self.as_str()))
+            }
+        }
+
+        impl FromSql for $ty {
+            fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                value.as_str()?.parse().map_err(|e| FromSqlError::Other(Box::new(e)))
+            }
+        }
+    )+};
+}
+
+sql_text_enum!(
+    VcsKind,
+    OutcomeKind,
+    SkipKind,
+    FailReason,
+    HookOutcome,
+    Platform,
+    RunWhen,
+    GlyphMode
+);
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A fresh, migrated database in a temporary directory.
+    pub(crate) fn fresh() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("vuta.db")).unwrap();
+        (dir, conn)
+    }
 
     fn tables(conn: &Connection) -> Vec<String> {
         let mut stmt = conn

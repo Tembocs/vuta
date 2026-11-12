@@ -22,6 +22,11 @@ pub fn resolve_db_path(flag: Option<&Path>) -> Result<PathBuf, Error> {
         .map_err(|err| anyhow::anyhow!("cannot make {} absolute: {err}", path.display()).into())
 }
 
+/// The sync lock file, `vuta.lock` beside the database.
+pub fn lock_path(db_path: &Path) -> PathBuf {
+    db_path.with_file_name("vuta.lock")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RelPathError {
     #[error("path is empty")]
@@ -103,6 +108,12 @@ mod tests {
         let root = Path::new("base");
         let joined = join_rel_path(root, "rust/zed").unwrap();
         assert_eq!(joined, root.join("rust").join("zed"));
+    }
+
+    #[test]
+    fn lock_sits_beside_the_database() {
+        let db = Path::new("data").join("vuta.db");
+        assert_eq!(lock_path(&db), Path::new("data").join("vuta.lock"));
     }
 
     #[test]

@@ -1,1 +1,1 @@
-//! Per-repository sync decisions (ARCHITECTURE.md section 7).
+//! Per-repository sync decisions (docs/ARCHITECTURE.md section 7).

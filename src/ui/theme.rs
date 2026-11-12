@@ -3,6 +3,8 @@
 
 use anstyle::{AnsiColor, Style};
 
+use crate::model::GlyphMode;
+
 pub struct Theme {
     pub ok: Style,
     pub new: Style,
@@ -33,6 +35,10 @@ pub struct Glyphs {
     pub skipped: &'static str,
     pub failed: &'static str,
     pub hook_running: &'static str,
+    /// Between the old and new revision of an update.
+    pub arrow: &'static str,
+    /// Between the counts in the summary line.
+    pub separator: &'static str,
 }
 
 impl Glyphs {
@@ -43,6 +49,8 @@ impl Glyphs {
         skipped: "!",
         failed: "✗",
         hook_running: "▸",
+        arrow: "→",
+        separator: "·",
     };
 
     pub const ASCII: Glyphs = Glyphs {
@@ -52,7 +60,32 @@ impl Glyphs {
         skipped: "!",
         failed: "x",
         hook_running: ">",
+        arrow: "->",
+        separator: "-",
     };
+
+    pub fn for_mode(mode: GlyphMode) -> Glyphs {
+        match mode {
+            GlyphMode::Auto => Glyphs::detect(),
+            GlyphMode::Unicode => Glyphs::UNICODE,
+            GlyphMode::Ascii => Glyphs::ASCII,
+        }
+    }
+
+    /// The widest status glyph, so result lines stay aligned.
+    pub fn status_width(&self) -> usize {
+        [
+            self.updated,
+            self.cloned,
+            self.up_to_date,
+            self.skipped,
+            self.failed,
+        ]
+        .iter()
+        .map(|g| g.chars().count())
+        .max()
+        .unwrap_or(1)
+    }
 
     /// `ui.glyphs = auto`: Unicode everywhere except Windows consoles other
     /// than Windows Terminal, whose default fonts may lack these characters.

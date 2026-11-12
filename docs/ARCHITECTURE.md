@@ -39,7 +39,8 @@ One Cargo package with a thin `main.rs` and a library crate, so integration test
 vuta/
 ├── Cargo.toml
 ├── README.md
-├── ARCHITECTURE.md            this document, exported as Markdown
+├── docs/
+│   └── ARCHITECTURE.md        this document, exported as Markdown
 ├── LICENSE-MIT
 ├── LICENSE-APACHE
 ├── .gitignore                 /target
@@ -339,11 +340,20 @@ pub enum Outcome {
     Failed     { reason: FailReason, message: String },
 }
 
-pub enum SkipReason { Dirty, Diverged, Detached, NoUpstream, RemoteMismatch, Disabled }
+pub enum SkipReason {
+    Dirty,
+    Diverged       { ahead: u32 },
+    Detached       { rev: String },
+    NoUpstream     { branch: String },
+    RemoteMismatch { found: String, expected: String },
+    Disabled,
+}
 pub enum FailReason { NotACheckout, Clone, Fetch, FastForward, Interrupted }
 ```
 
-`Outcome` is the one value a worker returns per repository. The database row, the coloured result line and the exit code are all derived from it.
+`Outcome` is the one value a worker returns per repository. The database row, the coloured result line and the exit code are all derived from it. Skip reasons carry what their result line needs (section 7); `SkipReason::describe` gives the plain text stored in `run_results.message`.
+
+`model.rs` also holds the row types the other layers exchange: `Hook`, `Run`, `RunResult`, `RepoEntry` (a repository with its root name, tags and cached last result), and `Tally` (outcome counts for the summary line and `vuta log`). Every enum stored as text (`OutcomeKind`, `SkipKind`, `FailReason`, `HookOutcome`, `Platform`, `RunWhen`, `GlyphMode`) parses case-insensitively from the same strings the schema's CHECK constraints allow.
 
 ### The trait (`vcs/mod.rs`)
 
@@ -375,6 +385,8 @@ pub trait Vcs: Send + Sync {
     fn fast_forward(&self, path: &Path) -> anyhow::Result<()>;
 }
 ```
+
+`vcs::backend(kind, tracer)` returns the implementation for a `VcsKind`. The optional tracer sees every command and its output, which is how `--verbose` reaches `ui` without the backend printing anything.
 
 The methods are small questions and single actions. All policy (what to do when dirty, diverged or detached) lives in `sync/worker.rs`, so a second backend inherits the same safety rules.
 
@@ -870,7 +882,7 @@ M2 syncs sequentially on purpose. The per-repository logic is where correctness 
 2. Add `migrations/0001_init.sql` from section 4.
 3. Create the empty module files from section 2 and declare them in `lib.rs`.
 4. Write `cli.rs` with the global flags and a `db path` subcommand, `ui/theme.rs` from section 9, and `db/mod.rs` from section 4.
-5. Export this document as Markdown to `ARCHITECTURE.md`, add the CI workflow from section 11, and push.
+5. Export this document as Markdown to `docs/ARCHITECTURE.md`, add the CI workflow from section 11, and push.
 
 ## 13. Deferred
 

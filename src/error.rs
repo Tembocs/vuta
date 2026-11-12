@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use crate::db::DbError;
 
-/// Exit codes (ARCHITECTURE.md section 10).
+/// Exit codes (docs/ARCHITECTURE.md section 10).
 pub mod exit {
     /// Everything requested succeeded.
     pub const OK: u8 = 0;

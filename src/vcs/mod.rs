@@ -7,6 +7,7 @@ pub mod remote;
 use std::path::Path;
 
 pub use crate::model::VcsKind;
+use crate::proc::Tracer;
 
 pub struct CloneSpec<'a> {
     pub url: &'a str,
@@ -17,8 +18,14 @@ pub struct CloneSpec<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Head {
-    Branch { name: String, rev: String },
-    Detached { rev: String },
+    Branch {
+        name: String,
+        rev: String,
+    },
+    Detached {
+        rev: String,
+    },
+    /// A branch with no commits yet.
     Unborn,
 }
 
@@ -38,4 +45,11 @@ pub trait Vcs: Send + Sync {
     /// `None` when the current branch has no upstream.
     fn divergence(&self, path: &Path) -> anyhow::Result<Option<Divergence>>;
     fn fast_forward(&self, path: &Path) -> anyhow::Result<()>;
+}
+
+/// The backend for `kind`. `tracer`, when given, sees every command run.
+pub fn backend(kind: VcsKind, tracer: Option<Tracer>) -> Box<dyn Vcs> {
+    match kind {
+        VcsKind::Git => Box::new(git::Git::new(tracer)),
+    }
 }

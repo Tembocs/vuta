@@ -2,7 +2,7 @@
 
 Vuta ("pull" in Swahili) is a command-line tool that keeps many source checkouts cloned and up to date. Updates are fast-forward only, repositories sync in parallel, and all state lives in one SQLite database.
 
-> **Status:** early development (milestone M0). `vuta db path` and `vuta doctor` work; the registry and sync commands are next. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and milestones.
+> **Status:** early development (milestone M0). `vuta db path` and `vuta doctor` work; the registry and sync commands are next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and milestones.
 
 ## Build
 

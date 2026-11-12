@@ -1,6 +1,6 @@
 //! Vuta keeps a set of source checkouts cloned and up to date.
 //!
-//! See `ARCHITECTURE.md` for the design. The binary in `main.rs` is a thin
+//! See `docs/ARCHITECTURE.md` for the design. The binary in `main.rs` is a thin
 //! wrapper so that integration and unit tests reach the same code.
 
 pub mod cli;
