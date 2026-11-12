@@ -125,6 +125,12 @@ pub enum Command {
     #[command(subcommand)]
     Config(ConfigCommand),
 
+    /// Write the registry (roots, repositories, tags, hooks, settings) as JSON
+    Export(ExportArgs),
+
+    /// Add the roots, repositories, tags and hooks of a file from vuta export
+    Import(ImportArgs),
+
     /// Print a shell completion script, for example: vuta completions bash
     Completions {
         /// The shell to complete for
@@ -393,6 +399,30 @@ pub struct LogArgs {
     /// Output format
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Write to this file instead of stdout
+    #[arg(short, long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// A file written by vuta export, or - for stdin
+    #[arg(value_hint = ValueHint::FilePath)]
+    pub file: PathBuf,
+    /// Put the file's root NAME at PATH on this machine; if a root already
+    /// has that path, NAME's repositories join it. Repeat for several roots.
+    #[arg(long = "map-root", value_name = "NAME=PATH")]
+    pub map_roots: Vec<String>,
+    /// Leave out the file's hooks
+    #[arg(long)]
+    pub no_hooks: bool,
+    /// Show what would be imported without changing anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]

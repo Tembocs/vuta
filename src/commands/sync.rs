@@ -13,7 +13,9 @@ use std::time::Instant;
 use rusqlite::Connection;
 use serde_json::json;
 
-use super::{Ctx, checkout_path, location, print_json, repo_by_name, root_by_name, roots_by_id};
+use super::{
+    Ctx, checkout_path, location, print_json, repo_by_name, repositories, root_by_name, roots_by_id,
+};
 use crate::Error;
 use crate::cli::{Format, SyncArgs};
 use crate::db;
@@ -368,15 +370,6 @@ pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error
         }
     }
     Ok(ExitCode::from(code))
-}
-
-/// `1 repository`, `9 repositories`.
-fn repositories(n: usize) -> String {
-    if n == 1 {
-        "1 repository".to_owned()
-    } else {
-        format!("{n} repositories")
-    }
 }
 
 /// The command line as stored in `runs.args`, without the program name.

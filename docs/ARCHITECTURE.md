@@ -25,7 +25,7 @@ Vuta ("pull" in Swahili) is a single-binary Rust CLI that keeps a set of source 
 ### Out of scope for v1
 
 - Mercurial, Subversion and other VCS backends.
-- Config files, and import or export of the registry.
+- Config files. (`vuta export` and `vuta import` move the registry between machines, but the database stays the source of truth.)
 - Anything that writes to a remote: commit, push, tag.
 - Submodule management and progress bars.
 
@@ -57,11 +57,12 @@ vuta/
 │   ├── model.rs               Root, Repo, Hook, Run, Outcome, SkipReason
 │   ├── paths.rs               data directory, path normalisation, root + rel_path joins
 │   ├── proc.rs                spawn a child process, capture output, shared environment
+│   ├── transfer.rs            the registry file of vuta export and vuta import
 │   ├── commands/              one file per subcommand: read args, call core, render
 │   │   ├── mod.rs
 │   │   ├── root.rs  add.rs  scan.rs  sync.rs  list.rs  status.rs
 │   │   ├── show.rs  set.rs  tag.rs   remove.rs  hook.rs  log.rs
-│   │   └── config.rs  completions.rs  db.rs  doctor.rs
+│   │   └── config.rs  completions.rs  db.rs  doctor.rs  export.rs  import.rs
 │   ├── db/
 │   │   ├── mod.rs             open(), pragmas, migrate()
 │   │   └── roots.rs  repos.rs  hooks.rs  runs.rs  settings.rs    typed queries
@@ -449,7 +450,7 @@ Credentials themselves are untouched: SSH keys, `~/.ssh/config` and credential h
 
 ## 6. Command reference
 
-The command is `vuta <subcommand>`. Sixteen subcommands cover the registry, syncing, inspection and shell completion; section 12 says in which milestone each one lands.
+The command is `vuta <subcommand>`. Eighteen subcommands cover the registry, syncing, inspection, moving between machines and shell completion; section 12 says in which milestone each one lands.
 
 ### Global options
 
@@ -481,6 +482,8 @@ The command is `vuta <subcommand>`. Sixteen subcommands cover the registry, sync
 | `vuta remove <name>` (alias `rm`) | Forget a repository. `--delete-files` also deletes the checkout after a confirmation. |
 | `vuta hook add\|list\|remove` | Manage post-sync commands (section 8) |
 | `vuta log [name]` | Recent sync runs and their results |
+| `vuta export [-o FILE]` | Write roots, repositories, tags, hooks and changed settings as JSON |
+| `vuta import <FILE> [--map-root NAME=PATH]...` | Add what an exported file holds, with roots remapped |
 | `vuta config get\|set\|unset\|list` | Read and write rows in `settings`. `unset` returns a key to its default. |
 | `vuta completions <shell>` | Print a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |
 | `vuta db path` | Print the database location |
@@ -538,6 +541,23 @@ vuta status [name]... [--tag T]... [--root R]
 - The state follows the same checks as a sync, without fetching: `not cloned`, `not a Git checkout`, `origin is <url>`, `no origin remote`, `HEAD is detached`, `no commits yet`, or a combination of `local changes`, `N local commits`, `N commits behind` and `no upstream`, else `clean`. Dirty, behind and missing states are yellow.
 - Behind counts compare with the remote-tracking branch as of the last fetch; `vuta sync --fetch-only` refreshes them.
 - It exits 0 whatever the states are.
+
+### `vuta export` and `vuta import`
+
+```text
+vuta export [-o FILE]
+vuta import <FILE|-> [--map-root NAME=PATH]... [--no-hooks] [--dry-run]
+```
+
+They set up a second machine from the first: the same repositories, tags and hooks, under roots that may live elsewhere.
+
+- **The file** is JSON with `"format": "vuta-registry"` and `"version": 1` (`src/transfer.rs` documents it). It holds roots with their paths and default flag, repositories with root, relative path, URL, branch, clone options, enabled state, tags and hooks, and settings that differ from their defaults. Run history and cached revisions stay behind, since they describe one machine.
+- **Writing.** `-o FILE` writes UTF-8 directly. Prefer it on Windows, where PowerShell 5.1's `>` writes UTF-16; `import` reads UTF-16 and UTF-8 with or without a byte-order mark anyway.
+- **Roots** are resolved in order: `--map-root NAME=PATH` puts the file's root NAME at PATH (joining a local root that already has that path, else creating NAME there); without a mapping, a local root of the same name, then one with the same path, is used; otherwise the root is created at its exported path, which must be absolute here. A Windows path is not absolute on Linux, and the error names the `--map-root` to add.
+- **Only adds.** A repository whose name is registered already is skipped (the line says when its URL differs), as is one whose location is taken. A setting is applied only where the local value is still the default. A default root is set only if there is none. Nothing is cloned: `vuta sync` does that next.
+- **All or nothing.** The file is validated first (names, paths, tags, hook platforms), and the changes run inside one `db::atomic` unit, so an error leaves the database as it was. Importing the same file twice adds nothing the second time.
+- **Hooks** of added repositories are imported and each is listed with its platform and command, since hooks run on every sync. `--no-hooks` leaves them out. Disabled hooks are not imported.
+- **`--dry-run`** prints the same plan and changes nothing.
 
 ### `vuta completions`
 
@@ -687,7 +707,7 @@ vuta hook remove <id>
 | Failure | A non-zero exit sets `hook_outcome = failed` and makes the run exit 1. The repository's own outcome stays `updated`. |
 | Overrides | `vuta sync --no-hooks` skips all hooks. `--force-hooks` runs them even when nothing changed. |
 
-Hooks are arbitrary commands, so they only ever enter the database through `vuta hook add`. `vuta scan` and `vuta add` never read hooks from a repository's contents.
+Hooks are arbitrary commands, so they only ever enter the database through `vuta hook add`, or through `vuta import` of a file you exported, which lists every hook it adds and takes `--no-hooks`. `vuta scan` and `vuta add` never read hooks from a repository's contents.
 
 - `vuta hook add` refuses an empty command and warns when `--platform` excludes the current OS.
 - `vuta hook list` shows id, repository, platform, when and command. Hooks that cannot run on this machine are dim. `vuta show` lists a repository's hooks too.
@@ -918,6 +938,8 @@ Tests never touch the network: every "remote" is a bare Git repository in a temp
 | `paths.rs` | Joining a root with `rel_path`, `/` to `\` conversion, rejecting `..` and absolute `rel_path` values |
 | `db` | Migrations apply to an in-memory database, a second `open` changes nothing, and a too-new `user_version` is refused |
 | `ui/table.rs` | Column widths are identical with colour on and off |
+| `transfer.rs` | Defaults for missing fields, a round trip, UTF-8 with a BOM and UTF-16, and refusing other formats or newer versions |
+| `db` (`atomic`) | Nested units commit together, and a failing unit rolls back only its own writes |
 | `ui/json.rs` | Missing values are `null`, and enumerations use their stored strings |
 | `ui/report.rs` | Each `Outcome` renders the expected line, and with colour off the output contains no escape bytes |
 
@@ -1008,7 +1030,7 @@ Each item below is left out of v1 on purpose, and each has a known place to plug
 | Later feature | Where it plugs in |
 | --- | --- |
 | Mercurial, Subversion, Fossil, Jujutsu | A new file in `vcs/` implementing `Vcs`, a new `VcsKind` variant, and a migration that widens the `repos.vcs` CHECK. `scan` gains detection of `.hg`, `.svn` and so on. The sync engine does not change. |
-| Registry export and import | `vuta export` and `vuta import` as a transfer format between machines. The database stays the source of truth. |
+| Registry export and import | Done: `vuta export` and `vuta import` (section 6). |
 | JSON output | Done for `list`, `status`, `log` and `sync` (section 9). Other commands can adopt `--format` the same way. |
 | Submodules | A per-repository `submodules` column and one extra step after a fast-forward. |
 | Other update strategies | A per-repository `strategy` column (`ff-only`, `rebase`) read by `sync/worker.rs`. |

@@ -43,6 +43,16 @@ Global options: `--db <PATH>` (or `VUTA_DB`), `--color auto|always|never` (or `V
 
 Updates are fast-forward only. A checkout with local changes, local commits that diverge from upstream, a detached HEAD, no upstream branch or a different `origin` is skipped and left untouched. `vuta sync` exits 0 when everything succeeded, 1 when a repository or hook failed (or a repository was skipped, with `--strict`), 3 when it could not start, and 130 on Ctrl-C.
 
+### Moving to another machine
+
+```sh
+vuta export -o vuta-registry.json             # on the first machine
+vuta import vuta-registry.json --map-root src=/home/me/code   # on the second
+vuta sync                                     # clone everything
+```
+
+The file holds roots, repositories, tags, hooks and changed settings, but no history. `--map-root NAME=PATH` places a root elsewhere, or joins a root you already have at that path. Import only adds, lists every hook it adds (`--no-hooks` leaves them out), and `--dry-run` shows the plan first.
+
 ### Scripting
 
 `vuta list`, `status`, `log` and `sync` take `--format json` and then print one JSON value on stdout, with progress and hook output on stderr:

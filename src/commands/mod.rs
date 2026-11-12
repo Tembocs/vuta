@@ -8,7 +8,9 @@ pub mod completions;
 pub mod config;
 pub mod db;
 pub mod doctor;
+pub mod export;
 pub mod hook;
+pub mod import;
 pub mod list;
 pub mod log;
 pub mod remove;
@@ -82,6 +84,8 @@ pub fn run(cli: &Cli, ui: &mut Ui) -> Result<ExitCode, Error> {
         Command::Hook(cmd) => hook::run(ctx, cmd),
         Command::Log(args) => log::run(ctx, args),
         Command::Config(cmd) => config::run(ctx, cmd),
+        Command::Export(args) => export::run(ctx, args),
+        Command::Import(args) => import::run(ctx, args),
         Command::Completions { .. } => unreachable!("handled above"),
         Command::Db(DbCommand::Path) => db::path(ctx),
         Command::Doctor => doctor::run(ctx),
@@ -183,6 +187,15 @@ pub fn tracer(ui: &Ui) -> Option<Tracer> {
         let trace_ui = Ui::new(Verbosity::Verbose);
         Arc::new(move |captured: &Captured| trace_ui.trace(captured)) as Tracer
     })
+}
+
+/// `1 repository`, `9 repositories`.
+fn repositories(n: usize) -> String {
+    if n == 1 {
+        "1 repository".to_owned()
+    } else {
+        format!("{n} repositories")
+    }
 }
 
 /// The current time in Unix seconds.

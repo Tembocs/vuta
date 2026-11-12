@@ -687,3 +687,271 @@ fn status_as_json() {
     assert_eq!(missing["state"], "not_cloned");
     assert_eq!(missing["rev"], serde_json::Value::Null);
 }
+
+/// Machine A: two roots, tagged repositories, hooks, a disabled
+/// repository and a changed setting.
+fn machine_a() -> Env {
+    let env = Env::with_root();
+    let work = env.dir.path().join("work");
+    env.ok(&["root", "add", "work", arg(&work)]);
+    env.ok(&[
+        "add",
+        ZED,
+        "rust/zed",
+        "-t",
+        "rust",
+        "-t",
+        "editor",
+        "--branch",
+        "main",
+        "--no-clone",
+    ]);
+    env.ok(&["add", V, "v/v", "--filter", "blob:none", "--no-clone"]);
+    env.ok(&[
+        "add",
+        "https://example.com/tools.git",
+        "--root",
+        "work",
+        "--depth",
+        "1",
+        "--no-clone",
+    ]);
+    env.ok(&["set", "tools", "--disable"]);
+    env.ok(&["hook", "add", "v", "make", "--platform", "unix"]);
+    env.ok(&["hook", "add", "v", "make.bat", "--platform", "windows"]);
+    env.ok(&["hook", "add", "zed", "cargo build", "--always"]);
+    env.ok(&["config", "set", "sync.jobs", "8"]);
+    env
+}
+
+fn export_file(env: &Env) -> std::path::PathBuf {
+    let file = env.dir.path().join("registry.json");
+    let out = env.code(0, &["export", "-o", arg(&file)]);
+    assert!(
+        stderr(&out).contains("exported 3 repositories, 3 hooks and 2 roots"),
+        "{}",
+        stderr(&out)
+    );
+    file
+}
+
+fn repos_section(env: &Env) -> serde_json::Value {
+    json(&env.ok(&["export"]))["repos"].clone()
+}
+
+#[test]
+fn export_and_import_move_the_registry_to_another_machine() {
+    let a = machine_a();
+    let file = export_file(&a);
+
+    let b = Env::new();
+    let src = b.dir.path().join("src");
+    let work = b.dir.path().join("work");
+    let out = b.ok(&[
+        "import",
+        arg(&file),
+        "--map-root",
+        &format!("src={}", arg(&src)),
+        "--map-root",
+        &format!("work={}", arg(&work)),
+    ]);
+    assert!(out.contains("3 repositories added"), "{out}");
+    assert!(
+        line_for(&out, "make.bat").contains("[windows, changed]"),
+        "{out}"
+    );
+
+    // Same repositories, tags and hooks; roots at the mapped paths.
+    assert_eq!(repos_section(&b), repos_section(&a));
+    let conn = b.conn();
+    let src_root = db::roots::by_name(&conn, "src").unwrap().unwrap();
+    assert_eq!(src_root.path, src);
+    assert!(src_root.is_default);
+    assert_eq!(
+        db::roots::by_name(&conn, "work").unwrap().unwrap().path,
+        work
+    );
+    assert!(!db::repos::by_name(&conn, "tools").unwrap().unwrap().enabled);
+    assert_eq!(b.ok(&["config", "get", "sync.jobs"]).trim(), "8");
+
+    // Importing again changes nothing.
+    let again = b.ok(&[
+        "import",
+        arg(&file),
+        "--map-root",
+        &format!("src={}", arg(&src)),
+        "--map-root",
+        &format!("work={}", arg(&work)),
+    ]);
+    assert!(
+        again.contains("0 repositories added") && again.contains("3 skipped"),
+        "{again}"
+    );
+    assert_eq!(db::hooks::all(&conn).unwrap().len(), 3);
+}
+
+#[test]
+fn export_to_stdout_and_import_from_stdin() {
+    let a = machine_a();
+    let exported = a.ok(&["export"]);
+    let doc = json(&exported);
+    assert_eq!(doc["format"], "vuta-registry");
+    assert_eq!(doc["version"], 1);
+    assert_eq!(doc["settings"], serde_json::json!({ "sync.jobs": "8" }));
+    assert!(doc.get("last_rev").is_none() && doc["repos"][0].get("last_rev").is_none());
+
+    // Without mappings, roots are created at their exported paths.
+    let b = Env::new();
+    let out = b
+        .vuta()
+        .args(["import", "-", "--no-hooks"])
+        .write_stdin(exported)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(db::hooks::all(&b.conn()).unwrap().len(), 0);
+    assert_eq!(
+        db::repos::by_name(&b.conn(), "zed")
+            .unwrap()
+            .unwrap()
+            .rel_path,
+        "rust/zed"
+    );
+    assert_eq!(
+        db::roots::by_name(&b.conn(), "src").unwrap().unwrap().path,
+        a.root()
+    );
+}
+
+#[test]
+fn import_merges_into_an_existing_registry() {
+    let a = machine_a();
+    let file = export_file(&a);
+
+    // Machine B already has a root at the place src should go, a v of its
+    // own, something else at rust/zed, and its own sync.jobs.
+    let b = Env::new();
+    let code = b.dir.path().join("code");
+    b.ok(&["root", "add", "code", arg(&code)]);
+    b.ok(&[
+        "add",
+        "https://example.com/my-v.git",
+        "v/v",
+        "--name",
+        "v",
+        "--no-clone",
+    ]);
+    b.ok(&[
+        "add",
+        "https://example.com/other.git",
+        "rust/zed",
+        "--name",
+        "other",
+        "--no-clone",
+    ]);
+    b.ok(&["config", "set", "sync.jobs", "2"]);
+    let work = b.dir.path().join("work");
+
+    let out = b.ok(&[
+        "import",
+        arg(&file),
+        "--map-root",
+        &format!("src={}", arg(&code)),
+        "--map-root",
+        &format!("work={}", arg(&work)),
+    ]);
+    assert!(line_for(&out, "code").contains("use"), "{out}");
+    assert!(line_for(&out, "v").contains("another URL"), "{out}");
+    assert!(out.contains("'other' is already at code:rust/zed"), "{out}");
+    assert!(
+        line_for(&out, "sync.jobs").contains("local value 2 kept"),
+        "{out}"
+    );
+    assert!(out.contains("1 repository added"), "{out}");
+
+    let conn = b.conn();
+    let tools = db::repos::by_name(&conn, "tools").unwrap().unwrap();
+    assert_eq!(
+        db::roots::by_id(&conn, tools.root_id)
+            .unwrap()
+            .unwrap()
+            .name,
+        "work"
+    );
+    // Skipped repositories bring no hooks; the existing default stays.
+    assert!(db::hooks::all(&conn).unwrap().is_empty());
+    assert_eq!(db::roots::default(&conn).unwrap().unwrap().name, "code");
+    assert_eq!(b.ok(&["config", "get", "sync.jobs"]).trim(), "2");
+}
+
+#[test]
+fn import_dry_run_and_errors_change_nothing() {
+    let a = machine_a();
+    let file = export_file(&a);
+    let b = Env::new();
+    let src = format!("src={}", arg(&b.dir.path().join("src")));
+    let work = format!("work={}", arg(&b.dir.path().join("work")));
+
+    let out = b.ok(&[
+        "import",
+        arg(&file),
+        "--map-root",
+        &src,
+        "--map-root",
+        &work,
+        "--dry-run",
+    ]);
+    assert!(out.contains("dry run, nothing changed"), "{out}");
+    assert!(names(&b).is_empty());
+    assert!(db::roots::all(&b.conn()).unwrap().is_empty());
+
+    // A bad hook at the end rejects the whole file.
+    let mut doc = json(&std::fs::read_to_string(&file).unwrap());
+    doc["repos"][2]["hooks"] = serde_json::json!([{ "command": "x", "platform": "mac" }]);
+    let bad = b.dir.path().join("bad.json");
+    std::fs::write(&bad, doc.to_string()).unwrap();
+    let out = b.code(
+        3,
+        &["import", arg(&bad), "--map-root", &src, "--map-root", &work],
+    );
+    assert!(
+        stderr(&out).contains("unknown platform 'mac'"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(names(&b).is_empty());
+    assert!(db::roots::all(&b.conn()).unwrap().is_empty());
+
+    // A root path that is not absolute here needs a mapping.
+    let mut doc = json(&std::fs::read_to_string(&file).unwrap());
+    doc["roots"][0]["path"] = "relative/src".into();
+    std::fs::write(&bad, doc.to_string()).unwrap();
+    let out = b.code(3, &["import", arg(&bad), "--map-root", &work]);
+    assert!(
+        stderr(&out).contains("--map-root src=<path>"),
+        "{}",
+        stderr(&out)
+    );
+
+    for args in [
+        &["import", arg(&file), "--map-root", "nope=/x"][..],
+        &["import", arg(&file), "--map-root", "src"],
+        &["import", arg(&b.dir.path().join("missing.json"))],
+    ] {
+        let out = b.code(3, args);
+        assert_eq!(
+            stderr(&out).lines().count(),
+            1,
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+    std::fs::write(&bad, "{\"format\": \"something-else\"}").unwrap();
+    let out = b.code(3, &["import", arg(&bad)]);
+    assert!(
+        stderr(&out).contains("not a Vuta registry"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(names(&b).is_empty());
+}
