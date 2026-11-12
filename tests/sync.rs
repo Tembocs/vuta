@@ -544,3 +544,61 @@ fn colour_follows_the_flag() {
     let always = env.code(0, &["--color", "always", "sync"]);
     assert!(always.stdout.contains(&0x1b));
 }
+
+#[test]
+fn log_shows_runs_and_results() {
+    let env = Env::with_root();
+    let out = env.code(0, &["log"]);
+    assert!(
+        stderr(&out).contains("no sync runs yet"),
+        "{}",
+        stderr(&out)
+    );
+
+    let mut fixture = Fixture::new();
+    let gone = Fixture::new();
+    register(&env, &fixture, "alpha");
+    register(&env, &gone, "beta");
+    env.ok(&["sync"]);
+    fixture.push_commit();
+    fs::remove_dir_all(gone.path("upstream.git")).unwrap();
+    env.code(1, &["sync"]);
+
+    let log = env.ok(&["log"]);
+    let lines: Vec<&str> = log.lines().collect();
+    assert!(
+        lines[0].starts_with("run 2") && lines[0].contains("exit 1"),
+        "{log}"
+    );
+    assert!(
+        lines[1].contains("1 updated") && lines[1].contains("1 failed"),
+        "{log}"
+    );
+    assert!(log.contains("run 1"), "{log}");
+    // Each run lists what was not simply up to date.
+    let run2: Vec<&str> = log.split("run 1").next().unwrap().lines().collect();
+    assert!(
+        run2.iter()
+            .any(|l| l.contains("updated") && l.contains("alpha")),
+        "{log}"
+    );
+    assert!(
+        run2.iter()
+            .any(|l| l.contains("failed") && l.contains("beta")),
+        "{log}"
+    );
+
+    let one = env.ok(&["log", "-n", "1"]);
+    assert!(!one.contains("run 1"), "{one}");
+
+    let alpha = env.ok(&["log", "alpha"]);
+    let lines: Vec<&str> = alpha.lines().collect();
+    assert_eq!(lines.len(), 3, "{alpha}");
+    assert!(
+        lines[1].contains("updated") && lines[1].contains("1 commit"),
+        "{alpha}"
+    );
+    assert!(lines[2].contains("cloned"), "{alpha}");
+
+    env.code(3, &["log", "nope"]);
+}

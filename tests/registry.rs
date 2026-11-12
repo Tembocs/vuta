@@ -405,3 +405,203 @@ fn glyph_setting_changes_output() {
     let out = env.ok(&["doctor"]);
     assert!(line_for(&out, "git").starts_with('✓'), "{out}");
 }
+
+/// A clone of `fixture` at `rel` under the root, whose origin then claims
+/// to be `url`. Scan reads the URL and never fetches it.
+fn checkout_claiming(env: &Env, fixture: &Fixture, rel: &str, url: &str) -> std::path::PathBuf {
+    let path = fixture.clone_to(&env.checkout(rel));
+    common::git(&path, &["remote", "set-url", "origin", url]);
+    path
+}
+
+fn names(env: &Env) -> Vec<String> {
+    db::repos::select(
+        &env.conn(),
+        &db::repos::Selection {
+            include_disabled: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .into_iter()
+    .map(|e| e.repo.name)
+    .collect()
+}
+
+#[test]
+fn scan_adopts_an_existing_tree() {
+    let env = Env::with_root();
+    let fixture = Fixture::new();
+    checkout_claiming(&env, &fixture, "rust/zed", ZED);
+    let v = checkout_claiming(&env, &fixture, "v", V);
+    // A repository inside a checkout is not registered separately.
+    checkout_claiming(
+        &env,
+        &fixture,
+        "v/vendor/inner",
+        "https://example.com/inner.git",
+    );
+    std::fs::create_dir_all(v.join("vendor")).unwrap();
+    // A checkout without origin is skipped with the reason.
+    let lonely = env.checkout("misc/lonely");
+    std::fs::create_dir_all(&lonely).unwrap();
+    common::git(&lonely, &["init", "-q"]);
+    // Plain folders are walked through.
+    std::fs::create_dir_all(env.checkout("empty/dir")).unwrap();
+
+    let dry = env.ok(&["scan", "--tag-from-parent", "--dry-run"]);
+    assert!(line_for(&dry, "zed").starts_with("would add"), "{dry}");
+    assert!(dry.contains("2 would be added"), "{dry}");
+    assert!(names(&env).is_empty());
+
+    let out = env.ok(&["scan", "--tag-from-parent"]);
+    assert!(line_for(&out, "zed").contains("src:rust/zed"), "{out}");
+    assert!(line_for(&out, "zed").contains("tags: rust"), "{out}");
+    assert!(
+        line_for(&out, "src:misc/lonely").contains("no origin remote"),
+        "{out}"
+    );
+    assert!(!out.contains("inner"), "{out}");
+    assert!(
+        out.contains("2 added") && out.contains("1 skipped"),
+        "{out}"
+    );
+
+    let conn = env.conn();
+    let zed = db::repos::by_name(&conn, "zed").unwrap().unwrap();
+    assert_eq!((zed.rel_path.as_str(), zed.url.as_str()), ("rust/zed", ZED));
+    assert_eq!(db::repos::tags(&conn, zed.id).unwrap(), ["rust"]);
+    let v = db::repos::by_name(&conn, "v").unwrap().unwrap();
+    // Directly under the root there is no parent to tag with.
+    assert!(db::repos::tags(&conn, v.id).unwrap().is_empty());
+
+    // A second scan finds nothing new.
+    let again = env.ok(&["scan"]);
+    assert!(
+        again.contains("0 added") && again.contains("2 already registered"),
+        "{again}"
+    );
+    assert_eq!(names(&env), ["v", "zed"]);
+}
+
+#[test]
+fn scan_respects_max_depth_and_dir() {
+    let env = Env::with_root();
+    let fixture = Fixture::new();
+    checkout_claiming(&env, &fixture, "a/b/c/deep", "https://example.com/deep.git");
+    checkout_claiming(
+        &env,
+        &fixture,
+        "a/shallow",
+        "https://example.com/shallow.git",
+    );
+
+    env.ok(&["scan", "--max-depth", "2"]);
+    assert_eq!(names(&env), ["shallow"]);
+    // Scanning a subdirectory registers under the root that contains it.
+    let out = env.ok(&["scan", env.checkout("a/b").to_str().unwrap()]);
+    assert!(line_for(&out, "deep").contains("src:a/b/c/deep"), "{out}");
+    assert_eq!(names(&env), ["deep", "shallow"]);
+    env.code(2, &["scan", "--max-depth", "0"]);
+}
+
+#[test]
+fn scan_skips_name_clashes_and_checkouts_outside_roots() {
+    let env = Env::with_root();
+    let fixture = Fixture::new();
+    env.ok(&["add", ZED, "elsewhere/zed", "--no-clone"]);
+    checkout_claiming(
+        &env,
+        &fixture,
+        "rust/zed",
+        "https://gitlab.com/fork/zed.git",
+    );
+
+    let outside = env.dir.path().join("outside");
+    let stray = fixture.clone_to(&outside.join("stray"));
+    common::git(
+        &stray,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.com/stray.git",
+        ],
+    );
+
+    let out = env.ok(&["scan"]);
+    let line = line_for(&out, "src:rust/zed");
+    assert!(line.contains("the name 'zed' is taken"), "{out}");
+    assert!(line.contains("--name"), "{out}");
+
+    let out = env.ok(&["scan", outside.to_str().unwrap()]);
+    assert!(out.contains("outside every root"), "{out}");
+    let out = env.ok(&["scan", outside.to_str().unwrap(), "--root", "src"]);
+    assert!(out.contains("outside root src"), "{out}");
+    assert_eq!(names(&env), ["zed"]);
+
+    env.code(3, &["scan", "--root", "nope"]);
+    let missing = env.dir.path().join("missing");
+    let out = env.code(3, &["scan", missing.to_str().unwrap()]);
+    assert!(
+        stderr(&out).contains("is not a directory"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn scan_needs_a_root() {
+    let env = Env::new();
+    let out = env.code(3, &["scan"]);
+    assert!(stderr(&out).contains("vuta root add"), "{}", stderr(&out));
+}
+
+#[test]
+fn status_reads_local_state_without_fetching() {
+    let env = Env::with_root();
+    let mut fixture = Fixture::new();
+    let url = fixture.url();
+    for name in ["clean", "dirty", "detached", "elsewhere", "missing"] {
+        env.ok(&["add", &url, "--name", name, "--no-clone"]);
+    }
+    let plain = env.checkout("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    env.ok(&["add", &url, "--name", "plain", "--no-clone"]);
+    env.ok(&["sync", "clean", "dirty", "detached", "elsewhere"]);
+    env.ok(&["add", &url, "--name", "off", "--no-clone"]);
+    env.ok(&["set", "off", "--disable"]);
+
+    std::fs::write(env.checkout("dirty").join("file.txt"), "edit").unwrap();
+    common::git(&env.checkout("detached"), &["checkout", "-q", "--detach"]);
+    common::git(
+        &env.checkout("elsewhere"),
+        &["remote", "set-url", "origin", "https://example.com/x.git"],
+    );
+    fixture.push_commit();
+
+    let out = env.ok(&["status"]);
+    let state = |name: &str| line_for(&out, name).to_owned();
+    assert!(state("clean").ends_with("clean"), "{out}");
+    assert!(state("clean").contains("main"), "{out}");
+    assert!(state("dirty").ends_with("local changes"), "{out}");
+    assert!(state("detached").ends_with("HEAD is detached"), "{out}");
+    assert!(
+        state("elsewhere").contains("origin is https://example.com/x.git"),
+        "{out}"
+    );
+    assert!(state("missing").ends_with("not cloned"), "{out}");
+    assert!(state("plain").ends_with("not a Git checkout"), "{out}");
+    assert!(state("off").ends_with("disabled"), "{out}");
+
+    // Behind counts come from the last fetch.
+    env.ok(&["sync", "clean", "--fetch-only"]);
+    let out = env.ok(&["status", "CLEAN"]);
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(
+        line_for(&out, "clean").ends_with("1 commit behind"),
+        "{out}"
+    );
+
+    env.code(3, &["status", "nope"]);
+}

@@ -7,11 +7,15 @@ pub mod add;
 pub mod config;
 pub mod db;
 pub mod doctor;
+pub mod hook;
 pub mod list;
+pub mod log;
 pub mod remove;
 pub mod root;
+pub mod scan;
 pub mod set;
 pub mod show;
+pub mod status;
 pub mod sync;
 pub mod tag;
 
@@ -61,12 +65,16 @@ pub fn run(cli: &Cli, ui: &mut Ui) -> Result<ExitCode, Error> {
     match &cli.command {
         Command::Root(cmd) => root::run(ctx, cmd),
         Command::Add(args) => add::run(ctx, args),
+        Command::Scan(args) => scan::run(ctx, args),
         Command::Sync(args) => sync::run(ctx, args),
         Command::List(args) => list::run(ctx, args),
+        Command::Status(args) => status::run(ctx, args),
         Command::Show(args) => show::run(ctx, args),
         Command::Set(args) => set::run(ctx, args),
         Command::Tag(args) => tag::run(ctx, args),
         Command::Remove(args) => remove::run(ctx, args),
+        Command::Hook(cmd) => hook::run(ctx, cmd),
+        Command::Log(args) => log::run(ctx, args),
         Command::Config(cmd) => config::run(ctx, cmd),
         Command::Db(DbCommand::Path) => db::path(ctx),
         Command::Doctor => doctor::run(ctx),

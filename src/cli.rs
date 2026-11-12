@@ -3,8 +3,10 @@
 use std::path::PathBuf;
 
 use clap::builder::styling::{AnsiColor, Styles};
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::model::Platform;
 use crate::ui::Verbosity;
 
 const HELP_STYLES: Styles = Styles::styled()
@@ -75,12 +77,18 @@ pub enum Command {
     /// Register a repository and clone it
     Add(AddArgs),
 
+    /// Register checkouts that already exist on disk
+    Scan(ScanArgs),
+
     /// Clone what is missing and update the rest
     Sync(SyncArgs),
 
     /// One line per repository
     #[command(visible_alias = "ls")]
     List(ListArgs),
+
+    /// Local state of each checkout, without touching the network
+    Status(StatusArgs),
 
     /// Everything about one repository
     Show(ShowArgs),
@@ -94,6 +102,13 @@ pub enum Command {
     /// Forget a repository
     #[command(visible_alias = "rm")]
     Remove(RemoveArgs),
+
+    /// Manage commands that run after a repository syncs
+    #[command(subcommand)]
+    Hook(HookCommand),
+
+    /// Recent sync runs and their results
+    Log(LogArgs),
 
     /// Read and write settings
     #[command(subcommand)]
@@ -159,6 +174,25 @@ pub struct AddArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct ScanArgs {
+    /// Directory to search [default: the root's path]
+    pub dir: Option<PathBuf>,
+    /// Register under this root [default: the root that contains each checkout]
+    #[arg(long, value_name = "ROOT")]
+    pub root: Option<String>,
+    /// Tag each repository with its parent directory's name
+    #[arg(long)]
+    pub tag_from_parent: bool,
+    /// How many directory levels below DIR to search
+    #[arg(long, value_name = "N", default_value_t = 4,
+          value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_depth: u32,
+    /// Show what would be registered without registering it
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct SyncArgs {
     /// Repositories to sync [default: every enabled repository]
     pub names: Vec<String>,
@@ -190,6 +224,18 @@ pub struct SyncArgs {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
+    /// Only repositories with this tag; repeat to allow several
+    #[arg(short, long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+    /// Only repositories under this root
+    #[arg(long, value_name = "ROOT")]
+    pub root: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// Repositories to inspect [default: all]
+    pub names: Vec<String>,
     /// Only repositories with this tag; repeat to allow several
     #[arg(short, long = "tag", value_name = "TAG")]
     pub tags: Vec<String>,
@@ -273,6 +319,42 @@ pub struct RemoveArgs {
     /// Do not ask for confirmation
     #[arg(short, long, requires = "delete_files")]
     pub yes: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HookCommand {
+    /// Attach a shell command that runs after the repository syncs
+    Add {
+        repo: String,
+        command: String,
+        /// Run only on this kind of OS
+        #[arg(long, default_value = "any", value_parser = platform_parser())]
+        platform: Platform,
+        /// Run after every sync, not only when the revision changed
+        #[arg(long)]
+        always: bool,
+    },
+    /// List hooks, of one repository or of all
+    #[command(visible_alias = "ls")]
+    List { repo: Option<String> },
+    /// Remove a hook by the id that `vuta hook list` shows
+    #[command(visible_alias = "rm")]
+    Remove { id: i64 },
+}
+
+fn platform_parser() -> impl TypedValueParser<Value = Platform> {
+    PossibleValuesParser::new(Platform::ALL.iter().map(|p| p.as_str()))
+        .map(|s| s.parse::<Platform>().expect("a listed platform parses"))
+}
+
+#[derive(Debug, Args)]
+pub struct LogArgs {
+    /// Show this repository's results instead of whole runs
+    pub name: Option<String>,
+    /// How many runs (or results) to show
+    #[arg(short = 'n', long, value_name = "N", default_value_t = 10,
+          value_parser = clap::value_parser!(u32).range(1..))]
+    pub limit: u32,
 }
 
 #[derive(Debug, Subcommand)]

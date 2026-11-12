@@ -501,10 +501,34 @@ vuta add <url> [path] [--name N] [--root R] [--tag T]... [--branch B]
 vuta scan [dir] [--root R] [--tag-from-parent] [--max-depth N] [--dry-run]
 ```
 
-- Walks `dir` (default: the default root, 4 levels deep) and registers every Git checkout that has an `origin` remote.
+- Walks `dir` (default: the path of `--root`, else of the default root; 4 levels deep) and registers every Git checkout that has an `origin` remote. A directory is a candidate when it contains `.git`, and `Vcs::is_checkout` confirms it. Symbolic links are not followed.
 - Does not descend into a checkout once it finds one, so submodules and vendored repositories are not registered separately.
-- `--tag-from-parent` tags each repository with its parent directory name: `rust/zed` gets the tag `rust`.
-- A checkout with no `origin`, or outside every root, is listed as skipped with the reason.
+- Each checkout is registered under the root that contains it, the deepest one if roots nest. `--root R` restricts registration to that root.
+- The name is inferred from the `origin` URL, the same way as for `vuta add`. The branch is not recorded, so a later clone takes the remote's default branch.
+- `--tag-from-parent` tags each repository with its parent directory name: `rust/zed` gets the tag `rust`. A checkout directly under its root gets no tag.
+- A checkout with no `origin`, outside every root (or outside `--root`), or whose inferred name is already taken, is listed as skipped with the reason; a taken name comes with the `vuta add ... --name` command that registers it. An unreadable directory is skipped the same way.
+- A checkout already registered at that location is counted as "already registered" and not listed, so scanning again is safe.
+- `--dry-run` lists what would be added and registers nothing.
+
+### `vuta status`
+
+```text
+vuta status [name]... [--tag T]... [--root R]
+```
+
+- One row per repository: name, branch, short revision and state. Disabled repositories are included and shown as `disabled`.
+- The state follows the same checks as a sync, without fetching: `not cloned`, `not a Git checkout`, `origin is <url>`, `no origin remote`, `HEAD is detached`, `no commits yet`, or a combination of `local changes`, `N local commits`, `N commits behind` and `no upstream`, else `clean`. Dirty, behind and missing states are yellow.
+- Behind counts compare with the remote-tracking branch as of the last fetch; `vuta sync --fetch-only` refreshes them.
+- It exits 0 whatever the states are.
+
+### `vuta log`
+
+```text
+vuta log [name] [-n N]
+```
+
+- Without a name: the newest N runs (default 10), newest first. Each shows its id, age, exit code (or `unfinished` if the process was killed), command line, the summary line, and one line per repository whose result was not "up to date" or whose hook failed.
+- With a name: that repository's newest N results with run id, age, result, hook outcome and detail.
 
 ### `vuta sync`
 
@@ -634,6 +658,11 @@ vuta hook remove <id>
 | Overrides | `vuta sync --no-hooks` skips all hooks. `--force-hooks` runs them even when nothing changed. |
 
 Hooks are arbitrary commands, so they only ever enter the database through `vuta hook add`. `vuta scan` and `vuta add` never read hooks from a repository's contents.
+
+- `vuta hook add` refuses an empty command and warns when `--platform` excludes the current OS.
+- `vuta hook list` shows id, repository, platform, when and command. Hooks that cannot run on this machine are dim. `vuta show` lists a repository's hooks too.
+- `vuta hook remove` takes the id from `vuta hook list`. An unknown id exits 3. Removing a repository removes its hooks.
+- Hooks run after all result lines, under a `Hooks` heading that appears only when at least one hook is eligible. On Ctrl-C the hook that is running finishes (or dies with the terminal's signal), no further hook starts, and the run exits 130.
 
 ## 9. Terminal output and colour
 
@@ -790,7 +819,7 @@ The exit code tells a script or scheduled task what happened without parsing out
 | 0 | Everything requested succeeded. Skipped repositories are allowed unless `--strict` is set. |
 | 1 | At least one repository or hook failed |
 | 2 | Usage error: unknown flag, missing argument. This is clap's own code. |
-| 3 | Vuta could not start the work: `git` not found, database unreadable or newer than the binary, unknown repository or root name, another sync holds the lock |
+| 3 | Vuta could not start the work: `git` not found, database unreadable or newer than the binary, unknown repository, root or hook, an invalid name, path or setting, another sync or clone holds the lock |
 | 130 | Interrupted with Ctrl-C |
 
 ### Two kinds of failure
@@ -856,6 +885,9 @@ Tests never touch the network: every "remote" is a bare Git repository in a temp
 | Hook exits non-zero | Repository stays `updated`; exit 1 |
 | `--color never` and `--color always` | No escape bytes, and escape bytes, in the same output |
 | Unknown repository name | Exit 3 with a one-line error |
+| Ctrl-C during a hook (Unix only, sent with `kill -INT`) | Exit 130; no further hook runs; the run row is closed with 130 |
+
+The scenarios live in `tests/sync.rs` and `tests/hooks.rs`. `tests/registry.rs` covers the registry commands, `scan` and `status`. Hook commands in tests use only syntax that `sh -c` and `cmd /C` read the same way, such as `echo run>> hook.log` and `exit 3`; a test that needs shell-specific syntax adds one hook per platform.
 
 ### CI (`.github/workflows/ci.yml`)
 
@@ -896,6 +928,8 @@ Five milestones, each ending in something you can run. M3 makes Vuta usable day 
 | **M2 Sync** | Git backend, per-repository decisions, result lines, `runs` and `run_results`, exit codes, `add` clones, one repository at a time | `vuta sync` clones and fast-forwards correctly, and every skip and failure case has a passing test |
 | **M3 Scan and hooks** | `scan --tag-from-parent`, `status`, `hook add/list/remove`, hook runner | An existing tree of checkouts is adopted with `scan`, and V rebuilds only when it changed |
 | **M4 Parallel and history** | Worker pool, sync lock, Ctrl-C handling, `log`, history pruning, `--fetch-only`, `--strict`, `--dry-run` | Nine repositories sync 4 at a time, Ctrl-C exits 130 with a closed run row, and `vuta log` shows past runs |
+
+**Status on 12 Nov 2026:** M0 to M4 are implemented. Sync used the M4 worker pool from the start, since the engine was built before the commands.
 
 M2 syncs sequentially on purpose. The per-repository logic is where correctness lives, and it is easier to test before threads are involved. M4 then wraps the same `sync_one` function in the worker pool without changing it.
 
