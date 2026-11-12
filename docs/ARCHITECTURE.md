@@ -464,7 +464,7 @@ The command is `vuta <subcommand>`. Fifteen subcommands cover the registry, sync
 | `vuta remove <name>` (alias `rm`) | Forget a repository. `--delete-files` also deletes the checkout after a confirmation. |
 | `vuta hook add\|list\|remove` | Manage post-sync commands (section 8) |
 | `vuta log [name]` | Recent sync runs and their results |
-| `vuta config get\|set\|list` | Read and write rows in `settings` |
+| `vuta config get\|set\|unset\|list` | Read and write rows in `settings`. `unset` returns a key to its default. |
 | `vuta db path` | Print the database location |
 | `vuta doctor` | Check that `git` is on PATH, the database is sound, and every root exists |
 
@@ -478,6 +478,21 @@ vuta add <url> [path] [--name N] [--root R] [--tag T]... [--branch B]
 - `path` is relative to the root and defaults to the inferred name. `vuta add https://github.com/zed-industries/zed.git rust/zed --tag rust` places Zed under `rust/zed` in the default root.
 - `--filter blob:none` makes a partial clone, which suits large repositories you only build, such as Zed or Modular.
 - `--no-clone` only records the repository. The next `vuta sync` clones it.
+- A remote given as a local path that exists, such as `../mirror/zed.git`, is stored as an absolute path, so the repository syncs from any directory. Other remotes are stored as typed.
+- The name must not clash with another repository's, compared case-insensitively. Names, root names and tags must not be empty, contain whitespace or start with `+` or `-`.
+
+### Registry commands
+
+| Command | Details |
+| --- | --- |
+| `vuta root add <name> <path> [--default]` | A relative path is made absolute against the current directory. A path that does not exist yet is accepted with a warning; the first clone creates it. |
+| `vuta root list` | Name, repository count, path (marked `(missing)` when it does not exist) and which root is the default. |
+| `vuta root remove <name>` | Refused while repositories use the root. Removing the default root leaves no default, with a warning. |
+| `vuta list [--tag T]... [--root R]` | Includes disabled repositories, dimmed and marked `(disabled)`. A ROOT column appears when more than one root is registered. |
+| `vuta show <name>` | Root, path, URL, branch, clone options, enabled state, tags, the latest result, hooks, the last ten results, and the full git output of the newest failure. |
+| `vuta set <name> ...` | `--name`, `--url`, `--branch` or `--default-branch`, `--path`, `--root`, `--filter` or `--no-filter`, `--depth` or `--no-depth`, `--enable` or `--disable`. At least one is required. Only the record changes: if the location changes, Vuta warns that no files were moved. |
+| `vuta tag <name> [+tag\|-tag\|tag]...` | A bare tag is added. Removals apply before additions. With no tags it prints the repository's tags. |
+| `vuta remove <name> [--delete-files [-y]]` | Without `--delete-files` the checkout stays on disk. With it, Vuta deletes the path only if it is a Git checkout, after a `[y/N]` question on stderr (answered on stdin) that mentions local changes. Any answer but `y` or `yes` cancels everything and exits 1. `-y` skips the question. |
 
 ### `vuta scan`
 
@@ -819,7 +834,7 @@ Tests never touch the network: every "remote" is a bare Git repository in a temp
 
 ### Integration tests (`tests/`)
 
-`tests/common` builds a bare "upstream", pushes commits to it, and returns a `vuta` command already pointed at a temporary database and root.
+`tests/common` returns a `vuta` command already pointed at a temporary database and root. It includes `src/testutil.rs` with `#[path]`, so the integration tests and the unit tests share one fixture that builds a bare "upstream" and pushes commits to it. For that reason `testutil.rs` names nothing through `crate::`.
 
 | Scenario | Expected |
 | --- | --- |

@@ -13,18 +13,31 @@ const GAP: &str = "   ";
 pub struct Cell {
     text: String,
     style: Style,
+    /// Visible width of `text`.
+    width: usize,
 }
 
 impl Cell {
     pub fn new(text: impl Into<String>, style: Style) -> Self {
+        let text = text.into();
         Cell {
-            text: text.into(),
+            width: super::text_width(&text),
+            text,
             style,
         }
     }
 
     pub fn plain(text: impl Into<String>) -> Self {
         Cell::new(text, Style::new())
+    }
+
+    /// A cell already styled in several parts, such as a result detail.
+    pub fn styled(text: Styled) -> Self {
+        Cell {
+            width: text.width(),
+            text: text.into_string(),
+            style: Style::new(),
+        }
     }
 }
 
@@ -68,7 +81,7 @@ impl Table {
         }
         for row in &self.rows {
             for (i, cell) in row.iter().enumerate() {
-                widths[i] = widths[i].max(super::text_width(&cell.text));
+                widths[i] = widths[i].max(cell.width);
             }
         }
 
@@ -95,10 +108,9 @@ fn render_row(row: &[Cell], widths: &[usize]) -> String {
         if i > 0 {
             line.plain(GAP);
         }
-        if i + 1 == used {
-            line.push(&cell.text, cell.style);
-        } else {
-            line.push(&super::pad(&cell.text, widths[i]), cell.style);
+        line.push(&cell.text, cell.style);
+        if i + 1 < used {
+            line.plain(&" ".repeat(widths[i].saturating_sub(cell.width)));
         }
     }
     line.into_string()
@@ -124,6 +136,15 @@ mod tests {
             Cell::plain(""),
             Cell::new("rust/surrealdb", style(THEME.muted)),
         ]);
+        let mut rev = Styled::new();
+        rev.push("8be", style(THEME.rev))
+            .push("04d7", style(THEME.name));
+        table.push(vec![
+            Cell::styled(rev),
+            Cell::plain("v"),
+            Cell::plain("v/v"),
+            Cell::plain("-"),
+        ]);
         table
     }
 
@@ -140,6 +161,7 @@ mod tests {
                 "NAME        TAGS   PATH             REV",
                 "edit        rust   rust/edit        7c1d2ab",
                 "surrealdb          rust/surrealdb",
+                "8be04d7     v      v/v              -",
             ]
         );
     }

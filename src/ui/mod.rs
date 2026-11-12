@@ -112,6 +112,19 @@ impl Ui {
         anstream::eprintln!("{err}error:{err:#} {message:#}");
     }
 
+    /// Ask a yes-or-no question on stderr and read the answer from stdin.
+    /// Only `y` or `yes` (any case) is yes; end of input is no.
+    pub fn confirm(&self, question: impl Display) -> std::io::Result<bool> {
+        use std::io::Write as _;
+        let warn = THEME.warn;
+        anstream::eprint!("{warn}{question}{warn:#} [y/N] ");
+        anstream::stderr().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        let answer = answer.trim();
+        Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+    }
+
     /// A git command and its output, on stderr, only with `--verbose`.
     pub fn trace(&self, captured: &Captured) {
         if self.verbosity != Verbosity::Verbose {

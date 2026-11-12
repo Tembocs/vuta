@@ -1,14 +1,15 @@
-//! Test fixtures shared by unit tests: a bare upstream repository in a
-//! temporary directory, and a helper to run git for setup.
+//! Test fixtures: a bare upstream repository in a temporary directory, and
+//! a helper to run git for setup.
+//!
+//! Unit tests reach this as `crate::testutil`, and the integration tests
+//! include the same file from `tests/common`, so it must not name anything
+//! through `crate::`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
-
-use crate::vcs::git::Git;
-use crate::vcs::{CloneSpec, Vcs};
 
 /// Run git for test setup with a fixed identity, failing the test on error.
 pub fn git(cwd: &Path, args: &[&str]) -> String {
@@ -81,17 +82,18 @@ impl Fixture {
         self.upstream_rev()
     }
 
-    /// A clone at `work/checkout`, made by the backend.
+    /// A clone at `work/checkout`.
     pub fn checkout(&self) -> PathBuf {
-        let dest = self.path("work").join("checkout");
-        let url = self.url();
-        let spec = CloneSpec {
-            url: &url,
-            branch: None,
-            filter: None,
-            depth: None,
-        };
-        Git::default().clone_into(&spec, &dest).unwrap();
-        dest
+        self.clone_to(&self.path("work").join("checkout"))
+    }
+
+    /// A clone of the upstream at `dest`, which must not exist yet.
+    pub fn clone_to(&self, dest: &Path) -> PathBuf {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let dest_text = dest.to_str().unwrap();
+        git(self.dir.path(), &["clone", "-q", &self.url(), dest_text]);
+        dest.to_path_buf()
     }
 }

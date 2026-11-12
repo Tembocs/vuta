@@ -272,8 +272,16 @@ mod tests {
     fn clones_into_place() {
         let fixture = Fixture::new();
         let upstream_rev = git(&fixture.path("seed"), &["rev-parse", "HEAD"]);
-        let checkout = fixture.checkout();
+        let checkout = fixture.path("work").join("checkout");
+        let url = fixture.url();
+        let spec = CloneSpec {
+            url: &url,
+            branch: None,
+            filter: None,
+            depth: None,
+        };
         let vcs = Git::default();
+        vcs.clone_into(&spec, &checkout).unwrap();
 
         assert!(vcs.is_checkout(&checkout));
         assert!(!partial_path(&checkout).unwrap().exists());

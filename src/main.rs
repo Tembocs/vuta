@@ -8,8 +8,8 @@ use vuta::ui::{self, Ui};
 fn main() -> ExitCode {
     let cli = Cli::parse();
     ui::apply_color(cli.color);
-    let ui = Ui::new(cli.verbosity());
-    match commands::run(&cli, &ui) {
+    let mut ui = Ui::new(cli.verbosity());
+    match commands::run(&cli, &mut ui) {
         Ok(code) => code,
         Err(err) => {
             ui.error(&err);

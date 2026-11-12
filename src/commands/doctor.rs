@@ -11,9 +11,10 @@ use crate::error::exit;
 use crate::ui::Check;
 use crate::vcs::git;
 
-pub fn run(ctx: &Ctx) -> Result<ExitCode, Error> {
-    let ui = ctx.ui;
+pub fn run(ctx: &mut Ctx) -> Result<ExitCode, Error> {
     let mut healthy = true;
+    let conn = ctx.open_db();
+    let ui = &*ctx.ui;
 
     match git::version() {
         Ok(version) => ui.check(Check::Pass, "git", version),
@@ -31,7 +32,7 @@ pub fn run(ctx: &Ctx) -> Result<ExitCode, Error> {
         }
     }
 
-    let conn = match ctx.open_db() {
+    let conn = match conn {
         Ok(conn) => conn,
         Err(err) => {
             ui.check(Check::Fail, "database", err);
