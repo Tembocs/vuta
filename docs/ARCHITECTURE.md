@@ -347,6 +347,7 @@ pub enum SkipReason {
     NoUpstream     { branch: String },
     RemoteMismatch { found: String, expected: String },
     Disabled,
+    FetchOnly,     // --fetch-only fetched but left the tree alone
 }
 pub enum FailReason { NotACheckout, Clone, Fetch, FastForward, Interrupted }
 ```
@@ -541,6 +542,7 @@ Checks run top to bottom and the first one that fails decides the outcome. Green
 | skipped | `no_upstream` | branch `<name>` tracks no remote branch |
 | skipped | `diverged` | 2 local commits, 5 behind |
 | skipped | `dirty` | local changes; 3 commits behind |
+| skipped | `fetch_only` | 3 commits behind (only with `--fetch-only`) |
 | failed | `not_a_checkout` | path exists but is not a Git checkout |
 | failed | `clone`, `fetch`, `fast_forward` | the last line of git's error output |
 
@@ -577,6 +579,7 @@ pub fn run(jobs: Vec<Job>, workers: usize, stop: &AtomicBool, mut on_event: impl
 }
 ```
 
+- **Ending the loop.** With `--verbose`, the Git backend's tracer also holds a sender, so the channel never closes by itself. Each worker sends a final `WorkerDone` message, and the loop ends when every worker has sent one.
 - **Worker count.** `sync.jobs`, default 4, capped at the number of repositories. The work is network-bound, so the count is not tied to the number of CPU cores.
 - **Output order.** Result lines print as repositories finish, each with a `[3/9]` counter. A dim "cloning zed" line prints when a clone starts, because clones can run for minutes.
 - **Hooks stay serial.** Builds are CPU-heavy and their output is streamed live, so running two at once would interleave it.

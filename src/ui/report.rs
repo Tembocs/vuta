@@ -11,7 +11,9 @@ use anstyle::Style;
 
 use super::theme::{Glyphs, THEME};
 use super::{Styled, fmt_duration, pad};
-use crate::model::{FailReason, Outcome, OutcomeKind, SkipReason, Tally, count, short_rev};
+use crate::model::{
+    FailReason, HookEnd, Outcome, OutcomeKind, SkipReason, Tally, count, short_rev,
+};
 use crate::proc::last_line;
 
 /// Width of the status word column; "up to date" is the longest.
@@ -138,6 +140,10 @@ fn skip_detail(out: &mut Styled, reason: &SkipReason, behind: u32) {
         SkipReason::Disabled => {
             out.plain("disabled");
         }
+        SkipReason::FetchOnly => {
+            counted(out, behind, "commit");
+            out.plain(" behind");
+        }
     }
 }
 
@@ -212,16 +218,6 @@ pub fn hook_started_line(repo: &str, command: &str, glyphs: &Glyphs) -> String {
     out.into_string()
 }
 
-/// How a hook ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookEnd {
-    Ok,
-    /// `None` when the hook was killed by a signal.
-    Failed {
-        code: Option<i32>,
-    },
-}
-
 /// `  ✓ v  hook finished   48.2s`
 pub fn hook_finished_line(repo: &str, end: HookEnd, duration: Duration, glyphs: &Glyphs) -> String {
     let (style, glyph, words) = match end {
@@ -232,6 +228,7 @@ pub fn hook_finished_line(repo: &str, end: HookEnd, duration: Duration, glyphs: 
             format!("hook failed (exit {code})"),
         ),
         HookEnd::Failed { code: None } => (THEME.err, glyphs.failed, "hook was killed".to_owned()),
+        HookEnd::CouldNotStart => (THEME.err, glyphs.failed, "hook could not start".to_owned()),
     };
     let mut out = Styled::new();
     out.plain("  ")
@@ -359,6 +356,7 @@ mod tests {
                 expected: "y".into(),
             },
             SkipReason::Disabled,
+            SkipReason::FetchOnly,
         ];
         for reason in reasons {
             for behind in [0, 1, 5] {

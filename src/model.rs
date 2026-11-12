@@ -93,6 +93,7 @@ str_enum! {
         NoUpstream => "no_upstream",
         RemoteMismatch => "remote_mismatch",
         Disabled => "disabled",
+        FetchOnly => "fetch_only",
     }
 }
 
@@ -347,6 +348,8 @@ pub enum SkipReason {
         expected: String,
     },
     Disabled,
+    /// `vuta sync --fetch-only` fetched but left the working tree alone.
+    FetchOnly,
 }
 
 impl SkipReason {
@@ -358,6 +361,7 @@ impl SkipReason {
             SkipReason::NoUpstream { .. } => SkipKind::NoUpstream,
             SkipReason::RemoteMismatch { .. } => SkipKind::RemoteMismatch,
             SkipReason::Disabled => SkipKind::Disabled,
+            SkipReason::FetchOnly => SkipKind::FetchOnly,
         }
     }
 
@@ -378,8 +382,21 @@ impl SkipReason {
                 format!("origin is {found}, expected {expected}")
             }
             SkipReason::Disabled => "disabled".to_owned(),
+            SkipReason::FetchOnly => count(behind, "commit") + " behind",
         }
     }
+}
+
+/// How one hook ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEnd {
+    Ok,
+    /// `code` is `None` when the hook was killed by a signal.
+    Failed {
+        code: Option<i32>,
+    },
+    /// The shell could not be started.
+    CouldNotStart,
 }
 
 /// `n` followed by `noun`, pluralised with a trailing `s`.

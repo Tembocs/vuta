@@ -14,9 +14,9 @@ use std::time::Duration;
 use anstyle::Style;
 
 use crate::cli::ColorWhen;
-use crate::model::{GlyphMode, OutcomeKind, Tally, count};
+use crate::model::{GlyphMode, HookEnd, OutcomeKind, Tally, count};
 use crate::proc::Captured;
-use report::{HookEnd, ResultLine};
+use report::ResultLine;
 use table::Table;
 use theme::{Glyphs, THEME};
 

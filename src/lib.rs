@@ -14,4 +14,7 @@ pub mod sync;
 pub mod ui;
 pub mod vcs;
 
+#[cfg(test)]
+pub(crate) mod testutil;
+
 pub use error::Error;
