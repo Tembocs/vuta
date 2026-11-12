@@ -12,6 +12,7 @@ pub mod remove;
 pub mod root;
 pub mod set;
 pub mod show;
+pub mod sync;
 pub mod tag;
 
 use std::path::{Path, PathBuf};
@@ -60,6 +61,7 @@ pub fn run(cli: &Cli, ui: &mut Ui) -> Result<ExitCode, Error> {
     match &cli.command {
         Command::Root(cmd) => root::run(ctx, cmd),
         Command::Add(args) => add::run(ctx, args),
+        Command::Sync(args) => sync::run(ctx, args),
         Command::List(args) => list::run(ctx, args),
         Command::Show(args) => show::run(ctx, args),
         Command::Set(args) => set::run(ctx, args),

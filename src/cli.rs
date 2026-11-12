@@ -75,6 +75,9 @@ pub enum Command {
     /// Register a repository and clone it
     Add(AddArgs),
 
+    /// Clone what is missing and update the rest
+    Sync(SyncArgs),
+
     /// One line per repository
     #[command(visible_alias = "ls")]
     List(ListArgs),
@@ -153,6 +156,36 @@ pub struct AddArgs {
     /// Only register the repository; the next sync clones it
     #[arg(long)]
     pub no_clone: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SyncArgs {
+    /// Repositories to sync [default: every enabled repository]
+    pub names: Vec<String>,
+    /// Only repositories with this tag; repeat to allow several
+    #[arg(short, long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+    /// Only repositories under this root
+    #[arg(long, value_name = "ROOT")]
+    pub root: Option<String>,
+    /// How many repositories to sync at once [default: sync.jobs]
+    #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=64))]
+    pub jobs: Option<u32>,
+    /// Fetch and report how far behind, without changing any working tree
+    #[arg(long)]
+    pub fetch_only: bool,
+    /// Run no hooks
+    #[arg(long, conflicts_with = "force_hooks")]
+    pub no_hooks: bool,
+    /// Run hooks even for repositories that did not change
+    #[arg(long)]
+    pub force_hooks: bool,
+    /// Count skipped repositories as failures for the exit code
+    #[arg(long)]
+    pub strict: bool,
+    /// Print what would be cloned or fetched, and exit
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]

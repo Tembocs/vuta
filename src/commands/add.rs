@@ -1,15 +1,19 @@
-//! `vuta add <url> [path]`: register a repository and clone it.
+//! `vuta add <url> [path]`: register a repository and clone it. The clone
+//! is an ordinary one-repository run, so it is recorded in the history.
 
 use std::process::ExitCode;
 
 use anyhow::anyhow;
 
+use super::sync::{HookMode, Plan};
 use super::{Ctx, check_label, location, rel_path, root_or_default, stored_url};
 use crate::Error;
 use crate::cli::AddArgs;
 use crate::db;
-use crate::db::repos::NewRepo;
+use crate::db::repos::{NewRepo, Selection};
 use crate::model::VcsKind;
+use crate::paths;
+use crate::sync;
 use crate::ui::Styled;
 use crate::ui::theme::THEME;
 use crate::vcs::remote;
@@ -38,6 +42,13 @@ pub fn run(ctx: &mut Ctx, args: &AddArgs) -> Result<ExitCode, Error> {
     let rel = rel_path(args.path.as_deref().unwrap_or(&name))?;
     let url = stored_url(&args.url)?;
 
+    // Take the lock before registering, so a running sync cannot make
+    // this add fail half-way through.
+    let lock = if args.no_clone {
+        None
+    } else {
+        Some(sync::acquire_lock(&paths::lock_path(&ctx.db_path))?)
+    };
     let repo = db::repos::insert(
         &conn,
         &NewRepo {
@@ -59,9 +70,32 @@ pub fn run(ctx: &mut Ctx, args: &AddArgs) -> Result<ExitCode, Error> {
         .plain("  ")
         .push(&location(&root, &repo), THEME.muted);
     ui.result(line);
-    ui.progress(format_args!(
-        "not cloned yet; the next sync clones it: vuta sync {}",
-        repo.name
-    ));
-    Ok(ExitCode::SUCCESS)
+    if lock.is_none() {
+        ui.progress(format_args!(
+            "not cloned yet; the next sync clones it: vuta sync {}",
+            repo.name
+        ));
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let names = [repo.name.clone()];
+    let entries = db::repos::select(
+        &conn,
+        &Selection {
+            names: &names,
+            ..Default::default()
+        },
+    )?;
+    super::sync::execute(
+        ui,
+        &conn,
+        Plan {
+            entries,
+            workers: 1,
+            fetch_only: false,
+            hooks: HookMode::Normal,
+            strict: false,
+            framed: false,
+        },
+    )
 }

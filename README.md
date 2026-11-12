@@ -2,7 +2,7 @@
 
 Vuta ("pull" in Swahili) is a command-line tool that keeps many source checkouts cloned and up to date. Updates are fast-forward only, repositories sync in parallel, and all state lives in one SQLite database.
 
-> **Status:** early development (milestone M1). The registry commands work; syncing is next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and milestones.
+> **Status:** early development (milestones M1, M2). The registry commands and `vuta sync` work; scanning, hooks and history are next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and milestones.
 
 ## Build
 
@@ -17,7 +17,10 @@ cargo build --release
 
 ```sh
 vuta root add src ~/src                       # a base directory for checkouts
-vuta add https://github.com/zed-industries/zed.git rust/zed --tag rust --no-clone
+vuta add https://github.com/zed-industries/zed.git rust/zed --tag rust   # register and clone
+vuta sync                                     # clone what is missing, fast-forward the rest
+vuta sync zed --fetch-only                    # only fetch, and report how far behind
+vuta sync --tag rust -j 8 --strict            # filter, set parallelism, fail on skips
 vuta list                                     # one line per repository
 vuta show zed                                 # everything about one repository
 vuta set zed --branch main                    # change the record
@@ -29,6 +32,8 @@ vuta doctor                                   # check git, the database, and eve
 ```
 
 Global options: `--db <PATH>` (or `VUTA_DB`), `--color auto|always|never` (or `VUTA_COLOR`), `-q/--quiet`, `-v/--verbose`.
+
+Updates are fast-forward only. A checkout with local changes, local commits, a detached HEAD, no upstream branch or a different `origin` is skipped and left untouched. `vuta sync` exits 0 when everything succeeded, 1 when a repository or hook failed (or a repository was skipped, with `--strict`), 3 when it could not start, and 130 on Ctrl-C.
 
 ## Licence
 

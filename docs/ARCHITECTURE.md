@@ -296,8 +296,8 @@ CREATE TABLE settings (
 | `repos` | One row per managed checkout | Location is `roots.path` joined with `rel_path`. `last_*` columns cache the latest result so `vuta list` needs no join. |
 | `repo_tags` | Free-form labels | Group repositories, for example by language. Drives `vuta sync --tag rust`. |
 | `hooks` | Commands to run after a sync | Ordered by `position` within a repository. |
-| `runs` | One row per `vuta sync` | `finished_at` stays NULL if the process was killed. |
-| `run_results` | One row per repository per run | Feeds `vuta log` and `vuta show`. |
+| `runs` | One row per `vuta sync`, and per `vuta add` that clones | `finished_at` stays NULL if the process was killed. `args` is the command line without the program name. |
+| `run_results` | One row per repository per run | Feeds `vuta log` and `vuta show`. `hook_outcome` stays NULL for a repository with no hooks; it is `not_run` when hooks exist but none ran (`--no-hooks`, nothing eligible, or Ctrl-C). |
 | `settings` | Key-value preferences | `sync.jobs` (default 4), `history.keep_runs` (default 200), `ui.glyphs` (`auto`, `unicode`, `ascii`). |
 
 ### Conventions
@@ -477,6 +477,7 @@ vuta add <url> [path] [--name N] [--root R] [--tag T]... [--branch B]
 
 - `path` is relative to the root and defaults to the inferred name. `vuta add https://github.com/zed-industries/zed.git rust/zed --tag rust` places Zed under `rust/zed` in the default root.
 - `--filter blob:none` makes a partial clone, which suits large repositories you only build, such as Zed or Modular.
+- Without `--no-clone`, the clone is an ordinary one-repository run: it takes the sync lock before registering, prints one result line, is recorded in `runs`, and sets the exit code like `vuta sync`. A failed clone leaves the repository registered for the next sync.
 - `--no-clone` only records the repository. The next `vuta sync` clones it.
 - A remote given as a local path that exists, such as `../mirror/zed.git`, is stored as an absolute path, so the repository syncs from any directory. Other remotes are stored as typed.
 - The name must not clash with another repository's, compared case-insensitively. Names, root names and tags must not be empty, contain whitespace or start with `+` or `-`.
@@ -512,11 +513,13 @@ vuta sync [name]... [--tag T]... [--root R] [-j N] [--fetch-only]
           [--no-hooks] [--force-hooks] [--strict] [--dry-run]
 ```
 
-- With no names or filters it syncs every enabled repository.
-- `-j N` overrides `sync.jobs` for this run.
-- `--fetch-only` fetches and reports how far behind each checkout is, without changing any working tree.
+- With no names or filters it syncs every enabled repository. Names, `--tag` and `--root` combine: each one given must match, and repeated tags match any of them.
+- A disabled repository named on the command line is included and reported as skipped with reason `disabled`; filters alone never select one.
+- An unknown name or root exits 3 before anything runs. A selection that matches nothing prints "nothing to sync", records no run and exits 0.
+- `-j N` (1 to 64) overrides `sync.jobs` for this run.
+- `--fetch-only` fetches and reports how far behind each checkout is (as a `fetch_only` skip), without changing any working tree. A missing path is still cloned.
 - `--strict` makes a skipped repository count as a failure for the exit code.
-- `--dry-run` prints what would be cloned or fetched and exits.
+- `--dry-run` prints, from the disk alone, whether each repository would be cloned, fetched or skipped as disabled, and exits. It takes no lock and records no run.
 
 ### Adopting an existing tree
 
@@ -537,12 +540,14 @@ A sync run fetches every selected repository in parallel and changes a working t
 
 ### Phases of a run
 
-1. **Select.** Load enabled repositories that match the names, tags and root given.
+1. **Select.** Load enabled repositories that match the names, tags and root given, plus disabled ones named explicitly.
 2. **Lock.** Take an exclusive lock on `vuta.lock` beside the database with `File::try_lock`. If another sync holds it, exit with code 3 and say so.
 3. **Record.** Insert a `runs` row.
 4. **Sync.** Start the worker pool. Each worker takes a repository, decides what to do (below) and reports one `Outcome`.
 5. **Hooks.** Run hooks one repository at a time, in name order, for repositories whose revision changed.
 6. **Finish.** Update `runs`, prune old history, print the summary, and exit with the code from section 10.
+
+`commands/sync.rs` runs phases 3 to 6 in one function, `execute`, which `vuta add` also calls for its clone after taking the lock itself.
 
 ### Decisions for one repository
 
@@ -618,7 +623,7 @@ vuta hook remove <id>
 
 | Aspect | Behaviour |
 | --- | --- |
-| When it runs | After a clone, or after an update that moved the revision. `--always` runs it on every sync. |
+| When it runs | After a clone, or after an update that moved the revision. `--always` runs it on every sync. Never after a skip or a failure. A clone made under `--fetch-only` counts as a change. |
 | Platform | A hook marked `unix` or `windows` is ignored on the other. The V build is two hooks: `make` and `make.bat`. |
 | Shell | `sh -c <command>` on Unix, `cmd /C <command>` on Windows |
 | Working directory | The repository's checkout |
