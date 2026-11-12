@@ -1,0 +1,122 @@
+# Packaging Vuta
+
+Vuta builds two kinds of package with tools in this repository: a Debian package (`.deb`) on Linux and an MSIX package on Windows. Both are tasks in the `xtask` crate, run through the `cargo xtask` alias in `.cargo/config.toml`. Neither depends on GitHub: you build a package on your own machine and distribute the file however you like.
+
+| Task | Builds on | Uses | Output |
+| --- | --- | --- | --- |
+| `cargo xtask deb` | Linux | `dpkg-deb`, and `dpkg-shlibdeps` when present | `target/package/vuta_<version>-<revision>_<arch>.deb` |
+| `cargo xtask msix` | Windows | `makeappx` and `signtool` from the Windows SDK | `target/package/vuta_<version>.<revision>_<arch>.msix` |
+
+Both tasks build the release binary first (`cargo build --release --locked --target <triple>`), then stage the package under `target/package/deb/` or `target/package/msix/`, and print the package path on stdout.
+
+Options both tasks take:
+
+| Option | Meaning |
+| --- | --- |
+| `--target <TRIPLE>` | Build for this Rust target instead of the host |
+| `--no-build` | Package the release binary already in `target/<triple>/release/` |
+| `--out-dir <DIR>` | Write the package here instead of `target/package/` |
+
+The version comes from `version` in the root `Cargo.toml`.
+
+## Debian package
+
+```sh
+cargo xtask deb
+sudo apt install ./target/package/vuta_0.1.0-1_amd64.deb
+```
+
+`dpkg-deb` comes with every Debian and Ubuntu system. For exact library dependencies, also install `dpkg-dev`, which provides `dpkg-shlibdeps`.
+
+### What the package contains
+
+| Path | Contents |
+| --- | --- |
+| `/usr/bin/vuta` | The binary, mode 0755 |
+| `/usr/share/doc/vuta/copyright` | Machine-readable copyright: the MIT text, and a pointer to Debian's copy of the Apache 2.0 text |
+
+Every file is owned by root, whoever builds the package. The control file has `Section: vcs` and `Depends: git` plus the shared libraries `dpkg-shlibdeps` reports for the binary, such as `libc6 (>= 2.39)`. If `dpkg-shlibdeps` is missing or cannot read the binary (for example when cross-building), the package depends on `git, libc6` and the task prints a warning.
+
+### Options
+
+| Option | Meaning |
+| --- | --- |
+| `--maintainer "Name <email>"` | The `Maintainer` field. Without it, `DEBFULLNAME` and `DEBEMAIL` are used (or `DEBEMAIL` alone in the `Name <email>` form), then git's `user.name` and `user.email`. |
+| `--revision N` | The Debian revision, default 1. Raise it when you repackage the same upstream version. |
+
+### Versions and architectures
+
+- `0.1.0` becomes `0.1.0-1`. A pre-release such as `0.2.0-beta.1` becomes `0.2.0~beta.1-1`, which sorts before the final `0.2.0-1`.
+- The architecture follows the target triple: `x86_64` is `amd64`, `aarch64` is `arm64`, `armv7 ... eabihf` is `armhf`, and so on.
+
+### Which systems the package installs on
+
+The binary links against the C library of the machine that built it, and the `libc6` version in `Depends` says so. A package built on a new release does not install on an older one. To support older releases, build on the oldest one you want to support, for example in a container:
+
+```sh
+docker run --rm -v "$PWD":/src -w /src rust:1-bookworm \
+  sh -c 'apt-get update && apt-get install -y dpkg-dev && cargo xtask deb --maintainer "Name <email>"'
+```
+
+## MSIX package
+
+Run on Windows with the Rust MSVC toolchain and the Windows SDK installed. The task finds `makeappx.exe` and `signtool.exe` on PATH, or in the newest `Windows Kits\10\bin\<version>\x64` (or `arm64`) folder. `--sdk-bin <DIR>` names the folder directly.
+
+### Signed packages
+
+Windows installs a signed package only when it trusts the certificate. The manifest's publisher must equal the certificate's subject, so `--pfx` needs `--publisher`:
+
+```powershell
+$env:VUTA_PFX_PASSWORD = '<pfx password>'
+cargo xtask msix --pfx C:\keys\vuta.pfx --publisher 'CN=Your Name'
+Add-AppxPackage target\package\vuta_0.1.0.0_x64.msix
+```
+
+The password is read from `VUTA_PFX_PASSWORD`, never from the command line. `--timestamp-url <URL>` adds a timestamp, so the signature stays valid after the certificate expires.
+
+For your own machines, a self-signed certificate is enough. Create it once, then trust it in the machine's Trusted People store (in an elevated PowerShell):
+
+```powershell
+$cert = New-SelfSignedCertificate -Type Custom -Subject 'CN=Your Name' `
+  -KeyUsage DigitalSignature -FriendlyName 'Vuta packaging' -CertStoreLocation 'Cert:\CurrentUser\My' `
+  -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
+$password = Read-Host -AsSecureString 'PFX password'
+Export-PfxCertificate -Cert $cert -FilePath vuta.pfx -Password $password
+Export-Certificate -Cert $cert -FilePath vuta.cer
+Import-Certificate -FilePath vuta.cer -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople'
+```
+
+Every machine that installs the package needs `vuta.cer` imported the same way. Keep `vuta.pfx` private.
+
+### Unsigned packages
+
+Without `--pfx`, the package is unsigned and its publisher is `CN=Vuta, OID.2.25.311729368913984317654407730594956997722=1`. That OID marks an unsigned package, which Windows versions with unsigned-package support (Windows 11) install with:
+
+```powershell
+cargo xtask msix
+Add-AppxPackage -AllowUnsigned target\package\vuta_0.1.0.0_x64.msix
+```
+
+This suits a quick local test. CI exercises only the signed path.
+
+### What the package does
+
+- **Puts `vuta` on PATH** through an app execution alias, `%LOCALAPPDATA%\Microsoft\WindowsApps\vuta.exe`, declared as a console program, so it runs in the terminal you call it from.
+- **Adds no Start menu entry.** Vuta is a command-line tool.
+- **Keeps the database where the documentation says**, at `%LOCALAPPDATA%\vuta\data\vuta.db`. MSIX normally redirects an app's writes to AppData into a private per-package folder that is deleted on uninstall. The manifest turns that off (`desktop6:FileSystemWriteVirtualization`, with the `unvirtualizedResources` capability), so an uninstall or reinstall keeps the registry, and a Vuta installed another way uses the same database.
+- **Carries `LICENSE-MIT.txt` and `LICENSE-APACHE.txt`** beside the binary, and logos drawn by `xtask/src/png.rs`, so the repository holds no binary assets.
+
+The manifest requires Windows 10 version 2004 (build 19041) or newer, the first version with the virtualization setting.
+
+### Versions and architectures
+
+- MSIX versions have four numbers: `0.1.0` becomes `0.1.0.0`. `--revision N` sets the fourth, to tell rebuilds of one version apart.
+- A pre-release version is refused, because MSIX cannot express it and it would collide with the final release.
+- `x86_64` is `x64`, `aarch64` is `arm64`, and `i686` is `x86`.
+
+## Checks in CI
+
+The `package` job in `.github/workflows/ci.yml` runs both tasks on every push. It does not upload or release anything.
+
+- **On Ubuntu,** it builds the `.deb`, installs it with `apt`, and runs `vuta --version` and `vuta doctor`.
+- **On Windows,** it creates a throwaway self-signed certificate, builds and signs the `.msix`, and installs it. It then runs `vuta` through the alias and checks that the database landed in the real `%LOCALAPPDATA%`.

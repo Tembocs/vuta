@@ -33,14 +33,16 @@ Section 13 says where each of these plugs in later.
 
 ## 2. Repository layout
 
-One Cargo package with a thin `main.rs` and a library crate, so integration tests and unit tests reach the same code.
+One Cargo package with a thin `main.rs` and a library crate, so integration tests and unit tests reach the same code. The workspace has one more member, `xtask`, which holds packaging tools and is never published or installed.
 
 ```text
 vuta/
-├── Cargo.toml
+├── Cargo.toml                 the vuta package, and a workspace with xtask
 ├── README.md
+├── .cargo/config.toml         the `cargo xtask` alias
 ├── docs/
-│   └── ARCHITECTURE.md        this document, exported as Markdown
+│   ├── ARCHITECTURE.md        this document, exported as Markdown
+│   └── PACKAGING.md           building .deb and .msix packages
 ├── LICENSE-MIT
 ├── LICENSE-APACHE
 ├── .gitignore                 /target
@@ -82,6 +84,14 @@ vuta/
     ├── registry.rs
     ├── sync.rs
     └── hooks.rs
+xtask/                         cargo xtask deb | msix (docs/PACKAGING.md)
+├── Cargo.toml                 clap and anyhow only
+└── src/
+    ├── main.rs                task definitions
+    ├── meta.rs                package metadata, target triple, release build
+    ├── deb.rs                 Debian package with dpkg-deb
+    ├── msix.rs                MSIX package with makeappx and signtool
+    └── png.rs                 the MSIX logos, drawn and encoded without dependencies
 ```
 
 ### Three rules that keep the modules honest
@@ -909,9 +919,14 @@ jobs:
       - uses: actions/checkout@v7
       - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  package:   # builds, installs and runs the .deb and .msix; see docs/PACKAGING.md
 ```
+
+- `--workspace` makes clippy and the tests cover `xtask` as well.
+- The `package` job proves the packaging tools work on every push. It uploads and releases nothing; packages for distribution are built locally with `cargo xtask`.
 
 - GitHub's runners ship with `rustup` and `git`, so the workflow needs no third-party actions.
 - `actions/checkout@v7` was the latest major version on 12 Nov 2026.
@@ -954,7 +969,7 @@ Each item below is left out of v1 on purpose, and each has a known place to plug
 | Other update strategies | A per-repository `strategy` column (`ff-only`, `rebase`) read by `sync/worker.rs`. |
 | Live progress | Spinner lines per worker, drawn by `ui` from the `Started` and `Finished` events it already receives. |
 | Shell completions | `clap_complete`, generated from the existing `cli.rs`. |
-| Release binaries | A release workflow that attaches Linux and Windows builds to a GitHub release, then `cargo install vuta` once the crate is published. |
+| Release binaries | Packages are built locally: `cargo xtask deb` and `cargo xtask msix` (docs/PACKAGING.md). Publishing them, and `cargo install vuta` once the crate is on crates.io, are still open. |
 
 ### Open questions
 

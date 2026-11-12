@@ -15,5 +15,56 @@ jobs:
       - uses: actions/checkout@v7
       - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # Builds, installs and runs each package to prove the packaging tools
+  # work. Nothing is uploaded or released.
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install stable --profile minimal
+      - name: Debian package
+        if: runner.os == 'Linux'
+        run: |
+          cargo xtask deb --maintainer "Vuta CI <ci@example.invalid>"
+          deb=$(ls target/package/vuta_*.deb)
+          dpkg-deb --info "$deb"
+          sudo apt-get install -y "./$deb"
+          vuta --version
+          vuta --db "$RUNNER_TEMP/vuta.db" doctor
+      - name: MSIX package
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # A throwaway self-signed certificate, trusted on this runner only.
+          $cert = New-SelfSignedCertificate -Type Custom -Subject 'CN=Vuta CI' `
+            -KeyUsage DigitalSignature -FriendlyName 'Vuta CI' -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
+          $password = ConvertTo-SecureString -String 'ci' -Force -AsPlainText
+          $pfx = Join-Path $env:RUNNER_TEMP 'vuta-ci.pfx'
+          $cer = Join-Path $env:RUNNER_TEMP 'vuta-ci.cer'
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $password | Out-Null
+          Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+          Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+
+          $env:VUTA_PFX_PASSWORD = 'ci'
+          cargo xtask msix --pfx $pfx --publisher 'CN=Vuta CI'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $msix = (Get-ChildItem target\package\vuta_*.msix | Select-Object -First 1).FullName
+          Add-AppxPackage -Path $msix
+          Get-AppxPackage Vuta
+
+          $vuta = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\vuta.exe'
+          & $vuta --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $vuta doctor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Write virtualization is off, so the database is where the docs say.
+          $db = Join-Path $env:LOCALAPPDATA 'vuta\data\vuta.db'
+          if (-not (Test-Path $db)) { throw "database not found at $db" }

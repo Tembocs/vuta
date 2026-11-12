@@ -13,6 +13,10 @@ cargo build --release
 ./target/release/vuta doctor
 ```
 
+### Packages
+
+`cargo xtask deb` builds a Debian package on Linux, and `cargo xtask msix` builds an MSIX package on Windows. Both write to `target/package/`. See [docs/PACKAGING.md](docs/PACKAGING.md) for requirements, signing and what each package installs.
+
 ## Usage
 
 ```sh
