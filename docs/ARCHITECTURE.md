@@ -27,7 +27,7 @@ Vuta ("pull" in Swahili) is a single-binary Rust CLI that keeps a set of source 
 - Mercurial, Subversion and other VCS backends.
 - Config files. (`vuta export` and `vuta import` move the registry between machines, but the database stays the source of truth.)
 - Anything that writes to a remote: commit, push, tag.
-- Submodule management and progress bars.
+- Submodule management.
 
 Section 13 says where each of these plugs in later.
 
@@ -79,7 +79,8 @@ vuta/
 │       ├── mod.rs             Ui handle: stdout, stderr, verbosity
 │       ├── theme.rs           semantic styles and glyphs
 │       ├── table.rs           column alignment
-│       ├── report.rs          sync result lines and the summary
+│       ├── report.rs          sync result lines, live progress lines and the summary
+│       ├── live.rs            live progress during a sync, redrawn in place
 │       └── json.rs            the shapes of --format json
 └── tests/
     ├── common/mod.rs          temp dirs, local bare repos, vuta command builder
@@ -109,7 +110,7 @@ Arrows point from caller to callee. `sync` reaches Git only through `vcs`, and i
 
 ## 3. Dependencies
 
-Eleven runtime crates, all checked against crates.io on 12 Nov 2026. The minimum Rust version is 1.89 because `rusqlite` 0.42 requires it and the sync lock uses `File::try_lock`.
+Twelve runtime crates, all checked against crates.io on 12 Nov 2026. The minimum Rust version is 1.89 because `rusqlite` 0.42 requires it and the sync lock uses `File::try_lock`.
 
 ```toml
 [package]
@@ -123,11 +124,13 @@ repository = "https://github.com/Tembocs/vuta"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive", "env"] }
-clap_complete = "4.6"
+# The dynamic engine is unstable, so the version is pinned exactly.
+clap_complete = { version = "=4.6.11", features = ["unstable-dynamic"] }
 rusqlite = { version = "0.42", features = ["bundled"] }
 directories = "6"
 anstream = "1"
 anstyle = "1"
+anstyle-query = "1"
 thiserror = "2"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
@@ -146,10 +149,11 @@ strip = true
 | Crate | Why it is here |
 | --- | --- |
 | `clap` | Argument parsing with derive macros. The `env` feature backs `VUTA_DB` and `VUTA_COLOR`. |
-| `clap_complete` | Shell completion scripts generated from `cli.rs`, for `vuta completions`. No default features. |
+| `clap_complete` | Shell completion: the registration scripts of `vuta completions`, and the dynamic engine that answers each TAB from `cli.rs` and the registry. The engine is behind the `unstable-dynamic` feature, so the version is pinned with `=` and an upgrade is a deliberate change (section 6). |
 | `rusqlite` | SQLite access. `bundled` compiles SQLite in, so Windows needs no system library and both platforms get the same SQLite version. |
 | `directories` | Finds the per-user data directory on each OS. |
 | `anstream`, `anstyle` | Colour output. clap already depends on both, so they add nothing to the build. Section 9 covers their use. |
+| `anstyle-query` | Turns on the Windows console's handling of escape sequences, so live progress can move the cursor. anstream already depends on it. |
 | `thiserror` | The typed `Error` enum that maps to exit codes. |
 | `anyhow` | Error context inside commands, where the exact type does not matter. |
 | `serde`, `serde_json` | `--format json` output, and the registry file of `vuta export` and `vuta import`. |
@@ -163,6 +167,7 @@ strip = true
 - **A migration crate.** The runner is about 15 lines (section 4) and avoids pinning to another crate's `rusqlite` version range.
 - **A date-time crate.** Timestamps are Unix seconds from SQLite's `unixepoch()`. SQLite formats them for display.
 - **A table crate.** `ui/table.rs` pads columns itself, which keeps padding correct when cells carry colour codes.
+- **A progress-bar crate.** Live progress is a few lines that `ui/live.rs` erases and redraws with three escape sequences (section 9).
 
 ## 4. Data storage
 
@@ -486,7 +491,7 @@ The command is `vuta <subcommand>`. Eighteen subcommands cover the registry, syn
 | `vuta export [-o FILE]` | Write roots, repositories, tags, hooks and changed settings as JSON |
 | `vuta import <FILE> [--map-root NAME=PATH]...` | Add what an exported file holds, with roots remapped |
 | `vuta config get\|set\|unset\|list` | Read and write rows in `settings`. `unset` returns a key to its default. |
-| `vuta completions <shell>` | Print a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |
+| `vuta completions <shell>` | Print the script that registers completion for `bash`, `zsh`, `fish`, `powershell` or `elvish`. Names come from the registry. |
 | `vuta db path` | Print the database location |
 | `vuta doctor` | Check that `git` is on PATH, the database is sound, and every root exists |
 
@@ -501,6 +506,7 @@ vuta add <url> [path] [--name N] [--root R] [--tag T]... [--branch B]
 - `--filter blob:none` makes a partial clone, which suits large repositories you only build, such as Zed or Modular.
 - Without `--no-clone`, the clone is an ordinary one-repository run: it takes the sync lock before registering, prints one result line, is recorded in `runs`, and sets the exit code like `vuta sync`. A failed clone leaves the repository registered for the next sync.
 - `--no-clone` only records the repository. The next `vuta sync` clones it.
+- **First use.** With no roots registered and no `--root`, a person at a terminal is asked whether the current directory should become the first root, named after the directory (`src` when that name is not valid). Yes registers it as the default and the add goes on; no, or no terminal on stdin and stderr, exits 3 with the command that adds it, such as `vuta root add code /home/me/code`. Scripts never see a question. The question comes after the arguments are checked, so a typo creates no root.
 - A remote given as a local path that exists, such as `../mirror/zed.git`, is stored as an absolute path, so the repository syncs from any directory. Other remotes are stored as typed.
 - The name must not clash with another repository's, compared case-insensitively. Names, root names and tags must not be empty, contain whitespace or start with `+` or `-`.
 
@@ -531,6 +537,7 @@ vuta scan [dir] [--root R] [--tag-from-parent] [--max-depth N] [--dry-run]
 - A checkout with no `origin`, outside every root (or outside `--root`), or whose inferred name is already taken, is listed as skipped with the reason; a taken name comes with the `vuta add ... --name` command that registers it. An unreadable directory is skipped the same way.
 - A checkout already registered at that location is counted as "already registered" and not listed, so scanning again is safe.
 - `--dry-run` lists what would be added and registers nothing.
+- **First use.** With no roots registered and no `--root`, scan offers the directory it was given (else the current directory) as the first root, exactly as `vuta add` does. `--dry-run` never registers one; it only names the command.
 
 ### `vuta status`
 
@@ -566,11 +573,12 @@ They set up a second machine from the first: the same repositories, tags and hoo
 vuta completions <bash|zsh|fish|powershell|elvish>
 ```
 
-- Prints a script generated by `clap_complete` from `cli.rs`, so it always matches the current flags. It completes subcommands, flags, the fixed values of `--color`, `--platform` and the shell name, and paths, URLs and commands where `cli.rs` marks an argument with a `ValueHint`.
-- It reads no database and resolves no database path, so a shell's init file can run it anywhere.
-- Repository, root and tag names are not completed: a static script cannot read the registry. clap_complete's dynamic engine could, but it is still behind an unstable feature.
-- The fish generator skips positional values, so `vuta completions` appends the one fish line that completes the shell name. PowerShell and elvish scripts complete subcommands and flags but no positional values.
-- The `.deb` installs the bash, zsh and fish scripts (docs/PACKAGING.md).
+- Prints a short script that registers `vuta` with the shell. On each TAB the shell runs `COMPLETE=<shell> vuta -- <words of the line>`, and `main` answers that through clap_complete's dynamic engine (`CompleteEnv`) before parsing anything. `COMPLETE=bash vuta` prints the same kind of script, calling the binary by the path it was run as.
+- It completes subcommands, flags, fixed values (`--color`, `--platform`, `--format`, the shell name), paths where `cli.rs` marks an argument with a `ValueHint`, and from the registry: repository names (`sync`, `status`, `show`, `set`, `tag`, `remove`, `hook add`, `hook list`, `log`), root names (`--root`, `root default`, `root move`, `root remove`), tags (`--tag`, and `+tag`/`-tag` for `vuta tag`), hook ids (`hook remove`) and setting keys (`config get`, `set`, `unset`). In zsh, fish and PowerShell each name comes with a description: a repository's `root:path`, a root's path, how many repositories have a tag, a hook's repository and command.
+- **The completers in `commands/completions.rs` must never get in the way.** They use the database the line being completed names (`--db PATH` or `--db=PATH`, then `VUTA_DB`, then the platform default), open it read-only and only if the file exists, so a TAB never creates, migrates or locks a database, and they return nothing on any error. A completion takes about 2 ms.
+- Printing the script reads no database and resolves no database path, so a shell's init file can run it anywhere.
+- The zsh script, when zsh autoloads it from `fpath` as `_vuta` (as the `.deb` installs it), also calls the function it defines. clap_complete's script only registers the function, so without this the first TAB in each new shell would offer nothing.
+- **Pinned engine.** The engine is behind clap_complete's `unstable-dynamic` feature. `Cargo.toml` pins the exact version; upgrading it means checking the protocol between the script and the binary again. A script written to a file by an older vuta may stop working after an upgrade, which is why the README sources it at shell startup. The `.deb` regenerates its scripts with each build, so they always match the binary they ship with (docs/PACKAGING.md).
 
 ### `vuta log`
 
@@ -676,7 +684,8 @@ pub fn run(jobs: Vec<Job>, workers: usize, stop: &AtomicBool, mut on_event: impl
 
 - **Ending the loop.** With `--verbose`, the Git backend's tracer also holds a sender, so the channel never closes by itself. Each worker sends a final `WorkerDone` message, and the loop ends when every worker has sent one.
 - **Worker count.** `sync.jobs`, default 4, capped at the number of repositories. The work is network-bound, so the count is not tied to the number of CPU cores.
-- **Output order.** Result lines print as repositories finish, each with a `[3/9]` counter. A dim "cloning zed" line prints when a clone starts, because clones can run for minutes.
+- **Output order.** Result lines print as repositories finish, each with a `[3/9]` counter. On an interactive terminal a live line below them shows what each worker is on and for how long (section 9); otherwise a dim "cloning zed" line prints when a clone starts, because clones can run for minutes.
+- **Ticks.** For live progress the engine also sends `Event::Tick` every 500 ms (`Options::tick`), from the same receiving loop, so the calling thread stays the only one that writes to the terminal.
 - **Hooks stay serial.** Builds are CPU-heavy and their output is streamed live, so running two at once would interleave it.
 
 ### Interruption
@@ -843,6 +852,18 @@ Hooks
 - The glyph and status word take the status colour. Names are bold, hashes and counts magenta, durations dim.
 - In the summary each count takes its status colour, and zero counts are dim.
 
+While a sync runs on a terminal, a live block below the result lines shows each busy worker, in the columns of a result line:
+
+```text
+[2/9] ✓ updated     zed         3f9a2c1 → 8be04d7   42 commits       6.1s
+      ▸ cloning     turso       38s
+      ▸ syncing     edit        2s
+```
+
+- `ui/live.rs` draws it on stderr from the engine's `Started`, `Cloning`, `Finished` and `Tick` events. Before each result line it erases the block (cursor up, then clear to the end of the screen) and draws it again after, so result lines scroll up exactly as they do without it. When the last repository finishes the block is empty, so it is gone before hooks stream their output. Dropping it clears the screen too, so an error mid-run leaves nothing behind.
+- Erasing counts lines, so no line may wrap. Auto-wrap is off while the block is drawn (`ESC[?7l`, then `ESC[?7h`), so the terminal clips a long line, and when `COLUMNS` gives the width the name is cut first so the time stays visible. At most ten lines are drawn; more busy workers show as `and N more`.
+- Only when `Ui::can_redraw` holds: normal verbosity, stdout and stderr both terminals, `TERM` not `dumb`, and on Windows a console that accepts escape sequences (Windows 10 and later, turned on through `anstyle-query`). Piped output, `--quiet`, `--verbose` (whose git traces would interleave), `--format json` and `TERM=dumb` keep the plain lines and the dim "cloning" line. The escape sequences bypass anstream, so `--color never` still gets live progress, without colour.
+
 ```text
 $ vuta list
 NAME       TAGS   PATH         REV       SYNCED
@@ -857,7 +878,7 @@ zed        rust   rust/zed     8be04d7   2 hours ago
 
 ### JSON output
 
-`vuta list`, `status`, `log` and `sync` take `--format json`. Each then prints exactly one JSON value on stdout and no text there. Progress, warnings and errors stay on stderr. During `sync`, hooks' stdout is sent to stderr as well, so stdout always parses. `ui/json.rs` defines every shape in one place, built explicitly so that changing a model type cannot change the output by accident.
+`vuta list`, `status`, `show`, `log`, `sync`, `scan`, `import`, `root list`, `hook list` and `config list` take `--format json`. Each then prints exactly one JSON value on stdout and no text there. Progress, warnings and errors stay on stderr. During `sync`, hooks' stdout is sent to stderr as well, so stdout always parses. `ui/json.rs` defines every shape in one place, built explicitly so that changing a model type cannot change the output by accident.
 
 - **Conventions.** Keys are `snake_case`. A field without a value is `null`, never missing. Revisions are full hashes. Times are Unix seconds and durations milliseconds. Enumerations use the strings stored in the database (`up_to_date`, `fast_forward`). New fields may be added; existing ones keep their name and meaning.
 - **A command that fails to start** (exit 3) prints only its `error:` line on stderr, and nothing on stdout.
@@ -870,12 +891,19 @@ zed        rust   rust/zed     8be04d7   2 hours ago
 | `log <name>` | An array of that repository's results, newest first |
 | `sync` | An object: `run` (as in `log`, without results), `interrupted`, `elapsed_ms`, `tally` and `results`. `run` is `null` when nothing was selected. |
 | `sync --dry-run` | An array: `name`, `action` (`clone`, `fetch` or `skip`), `path`, `url` |
+| `show <name>` | An object: the fields of `list`, then `hooks` (as in `hook list`) and `results`, that repository's ten newest results, newest first |
+| `root list` | An array: `name`, `path`, `default`, `repos` (how many repositories it holds), `exists` (whether its directory is there) |
+| `hook list [repo]` | An array: `id`, `repo`, `command`, `platform` (`any`, `unix` or `windows`), `when` (`changed` or `always`), `enabled` |
+| `config list` | An array: `key`, `value`, `default`, `is_default`, `description` |
+| `scan` | An object: `dir`, `dry_run`, `added` (each `name`, `root`, `rel_path`, `path`, `url`, `tags`; with `--dry-run`, what would be added), `already_registered` (a count) and `skipped` (each `path` and `reason`) |
+| `import` | An object: `dry_run`, `roots` (each `name`, `path`, `action` (`use` or `create`), `becomes_default`), `repos` (each `name`, `root`, `rel_path`, `url`, `branch`, `clone_filter`, `clone_depth`, `enabled`, `tags`, `action` (`add` or `skip`), `reason` (for a skip) and `hooks`, each `command`, `platform`, `when`), `settings` (each `key`, `value`, `action` (`set`, `keep` or `skip`), `local_value` (for `keep`)) and `disabled_hooks`, how many disabled hooks were left out. The plan is the same with and without `--dry-run`. |
 
 A result is `run_id`, `repo`, `outcome`, `reason`, `old_rev`, `new_rev`, `commits`, `duration_ms`, `hook_outcome` and `message`, exactly as stored in `run_results`. `sync` reads its results back from the database after recording them, so it and `log` cannot disagree. A tally is `cloned`, `updated`, `up_to_date`, `skipped`, `failed` and `hooks_failed`.
 
 ```sh
 vuta sync --format json | jq -r '.results[] | select(.outcome == "failed") | .repo'
 vuta status --format json | jq -r '.[] | select(.behind > 0) | .name'
+vuta import registry.json --dry-run --format json | jq -r '.repos[].hooks[].command'
 ```
 
 ### Rules for `ui`
@@ -934,7 +962,7 @@ Tests never touch the network: every "remote" is a bare Git repository in a temp
 
 | Module | What is tested |
 | --- | --- |
-| `commands/completions.rs` | Every shell's script names the subcommands, and the fish script completes shell names |
+| `commands/completions.rs` | Every shell's script calls back into `vuta`, and `--db` is read from the line being completed |
 | `vcs/remote.rs` | Name inference and URL comparison across `https://`, `ssh://` and `git@host:path` forms |
 | `paths.rs` | Joining a root with `rel_path`, `/` to `\` conversion, rejecting `..` and absolute `rel_path` values |
 | `db` | Migrations apply to an in-memory database, a second `open` changes nothing, and a too-new `user_version` is refused |
@@ -942,7 +970,8 @@ Tests never touch the network: every "remote" is a bare Git repository in a temp
 | `transfer.rs` | Defaults for missing fields, a round trip, UTF-8 with a BOM and UTF-16, and refusing other formats or newer versions |
 | `db` (`atomic`) | Nested units commit together, and a failing unit rolls back only its own writes |
 | `ui/json.rs` | Missing values are `null`, and enumerations use their stored strings |
-| `ui/report.rs` | Each `Outcome` renders the expected line, and with colour off the output contains no escape bytes |
+| `ui/report.rs` | Each `Outcome` renders the expected line, live lines line up with result lines and are cut to the width, and with colour off the output contains no escape bytes |
+| `sync` | Every job finishes once, traces and ticks are sent only when asked, and a set stop flag starts nothing |
 
 ### Integration tests (`tests/`)
 
@@ -965,7 +994,7 @@ Tests never touch the network: every "remote" is a bare Git repository in a temp
 | Unknown repository name | Exit 3 with a one-line error |
 | Ctrl-C during a hook (Unix only, sent with `kill -INT`) | Exit 130; no further hook runs; the run row is closed with 130 |
 
-The scenarios live in `tests/sync.rs` and `tests/hooks.rs`. `tests/registry.rs` covers the registry commands, `scan` and `status`. Hook commands in tests use only syntax that `sh -c` and `cmd /C` read the same way, such as `echo run>> hook.log` and `exit 3`; a test that needs shell-specific syntax adds one hook per platform.
+The scenarios live in `tests/sync.rs` and `tests/hooks.rs`. `tests/registry.rs` covers the registry commands, `scan`, `status`, the first-root error without a terminal, and the JSON of every command that has it. `tests/cli.rs` runs completion requests the way fish sends them, against a real registry and against a database that does not exist, which must stay missing. Live progress and the first-root question need a terminal, so they are checked by hand with `script -qec 'vuta sync' log`, whose log replays the cursor movements. Hook commands in tests use only syntax that `sh -c` and `cmd /C` read the same way, such as `echo run>> hook.log` and `exit 3`; a test that needs shell-specific syntax adds one hook per platform.
 
 ### CI (`.github/workflows/ci.yml`)
 
@@ -1032,15 +1061,14 @@ Each item below is left out of v1 on purpose, and each has a known place to plug
 | --- | --- |
 | Mercurial, Subversion, Fossil, Jujutsu | A new file in `vcs/` implementing `Vcs`, a new `VcsKind` variant, and a migration that widens the `repos.vcs` CHECK. `scan` gains detection of `.hg`, `.svn` and so on. The sync engine does not change. |
 | Registry export and import | Done: `vuta export` and `vuta import` (section 6). |
-| JSON output | Done for `list`, `status`, `log` and `sync` (section 9). Other commands can adopt `--format` the same way. |
+| JSON output | Done for every command that lists or plans something (section 9). |
 | Submodules | A per-repository `submodules` column and one extra step after a fast-forward. |
 | Other update strategies | A per-repository `strategy` column (`ff-only`, `rebase`) read by `sync/worker.rs`. |
-| Live progress | Spinner lines per worker, drawn by `ui` from the `Started` and `Finished` events it already receives. |
-| Shell completions | Done: `vuta completions <shell>`. Completing repository and root names needs clap_complete's dynamic engine once it is stable. |
+| Live progress | Done: a live line per worker on a terminal (section 9). |
+| Shell completions | Done: `vuta completions <shell>`, completing names from the registry through clap_complete's dynamic engine (section 6). |
 | Release binaries | Packages are built locally: `cargo xtask deb` and `cargo xtask msix` (docs/PACKAGING.md). Publishing them, and `cargo install vuta` once the crate is on crates.io, are still open. |
 
 ### Open questions
 
 - **Licence.** This document assumes `MIT OR Apache-2.0`, the usual choice for Rust tools.
 - **Dirty checkouts.** v1 skips any checkout with modified tracked files. Git can often fast-forward safely around local edits; allowing that would be a per-repository opt-in.
-- **Default root on first use.** v1 requires `vuta root add` before `vuta add`. An alternative is to offer the current directory as the first root.

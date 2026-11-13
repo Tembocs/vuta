@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::Env;
+use common::{Env, stderr};
 
 fn stdout(output: &std::process::Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
@@ -94,13 +94,122 @@ fn completions_print_a_script_without_touching_the_database() {
     for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
         let out = env.vuta().args(["completions", shell]).assert().success();
         let text = stdout(out.get_output());
+        // The script calls `COMPLETE=<shell> vuta -- <words>` on TAB.
         assert!(
-            text.contains("sync") && text.contains("fetch-only"),
+            text.contains("COMPLETE") && text.contains("vuta"),
             "{shell}"
         );
     }
     assert!(!env.db().exists());
     env.vuta().args(["completions", "tcsh"]).assert().code(2);
+}
+
+/// What the shell gets on TAB for `words`, the last being the word being
+/// completed: one value per line, from fish's protocol, which needs no
+/// other variables. Help text after a tab is dropped. The database is the
+/// one the words name, as for a real shell.
+fn complete(words: &[&str]) -> Vec<String> {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_vuta"))
+        .env("COMPLETE", "fish")
+        .env_remove("VUTA_DB")
+        .arg("--")
+        .args(words)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.stderr.is_empty(), "{}", stderr(&out));
+    stdout(&out)
+        .lines()
+        .map(|line| line.split('\t').next().unwrap().to_owned())
+        // Drop flags such as `--db` and `-q`, keeping values like `-rust`.
+        .filter(|value| !(value.starts_with("--") || value.starts_with('-') && value.len() == 2))
+        .collect()
+}
+
+#[test]
+fn completion_reads_names_from_the_registry() {
+    let env = Env::with_root();
+    let db = env.db();
+    let db = db.to_str().unwrap();
+    env.ok(&[
+        "root",
+        "add",
+        "work",
+        env.dir.path().join("work").to_str().unwrap(),
+    ]);
+    env.ok(&[
+        "add",
+        "https://example.com/zed.git",
+        "-t",
+        "rust",
+        "-t",
+        "editor",
+        "--no-clone",
+    ]);
+    env.ok(&[
+        "add",
+        "https://example.com/zig.git",
+        "-t",
+        "rust",
+        "--no-clone",
+    ]);
+    env.ok(&["add", "https://example.com/v.git", "--no-clone"]);
+    env.ok(&["hook", "add", "v", "make"]);
+
+    assert_eq!(complete(&["vuta", "--db", db, "sync", "z"]), ["zed", "zig"]);
+    // `--db=PATH` and `--db` after the subcommand count too.
+    assert_eq!(
+        complete(&["vuta", "show", &format!("--db={db}"), "v"]),
+        ["v"]
+    );
+    assert_eq!(
+        complete(&["vuta", "--db", db, "list", "--root", ""]),
+        ["src", "work"]
+    );
+    assert_eq!(
+        complete(&["vuta", "--db", db, "root", "remove", "w"]),
+        ["work"]
+    );
+    assert_eq!(
+        complete(&["vuta", "--db", db, "sync", "--tag", "r"]),
+        ["rust"]
+    );
+    assert_eq!(
+        complete(&["vuta", "--db", db, "tag", "zed", "+e"]),
+        ["+editor"]
+    );
+    assert_eq!(
+        complete(&["vuta", "--db", db, "tag", "zed", "-"]),
+        ["-editor", "-rust"]
+    );
+    assert_eq!(complete(&["vuta", "--db", db, "hook", "remove", ""]), ["1"]);
+    assert_eq!(
+        complete(&["vuta", "config", "get", ""]),
+        ["sync.jobs", "history.keep_runs", "ui.glyphs"]
+    );
+
+    // VUTA_DB is used when the line has no --db.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_vuta"))
+        .env("COMPLETE", "fish")
+        .env("VUTA_DB", db)
+        .args(["--", "vuta", "log", "zi"])
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&out).split('\t').next(), Some("zig"));
+}
+
+#[test]
+fn completion_never_creates_a_database() {
+    let env = Env::new();
+    let db = env.db();
+    for words in [
+        &["vuta", "--db", db.to_str().unwrap(), "sync", ""][..],
+        &["vuta", "--db", db.to_str().unwrap(), "root", "default", ""],
+    ] {
+        assert!(complete(words).is_empty(), "{words:?}");
+    }
+    assert!(!db.exists());
+    assert!(!db.parent().unwrap().exists());
 }
 
 /// Each script must parse in its own shell. Shells that are not installed

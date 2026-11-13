@@ -1,4 +1,6 @@
-//! Command-line definitions. No logic lives here.
+//! Command-line definitions. No logic lives here; the `add = ...`
+//! attributes name the completers in `commands/completions.rs` that
+//! complete an argument from the registry.
 
 use std::path::PathBuf;
 
@@ -6,6 +8,9 @@ use clap::builder::styling::{AnsiColor, Styles};
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::Shell;
+use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
+
+use crate::commands::completions;
 
 use crate::model::Platform;
 use crate::ui::Verbosity;
@@ -61,7 +66,7 @@ impl Cli {
     }
 }
 
-/// How `list`, `status`, `log` and `sync` print their results.
+/// How a command prints its results.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     /// Aligned, coloured text for people
@@ -159,18 +164,29 @@ pub enum RootCommand {
     },
     /// Show roots and how many repositories each holds
     #[command(visible_alias = "ls")]
-    List,
+    List {
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
     /// Change the default root
-    Default { name: String },
+    Default {
+        #[arg(add = ArgValueCandidates::new(completions::root_names))]
+        name: String,
+    },
     /// Point a root at a new location. No files are moved.
     Move {
+        #[arg(add = ArgValueCandidates::new(completions::root_names))]
         name: String,
         #[arg(value_hint = ValueHint::DirPath)]
         new_path: PathBuf,
     },
     /// Remove a root that holds no repositories
     #[command(visible_alias = "rm")]
-    Remove { name: String },
+    Remove {
+        #[arg(add = ArgValueCandidates::new(completions::root_names))]
+        name: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -184,10 +200,10 @@ pub struct AddArgs {
     #[arg(long)]
     pub name: Option<String>,
     /// Root to put the checkout under [default: the default root]
-    #[arg(long, value_name = "ROOT")]
+    #[arg(long, value_name = "ROOT", add = ArgValueCandidates::new(completions::root_names))]
     pub root: Option<String>,
     /// Tag the repository; repeat for several tags
-    #[arg(short, long = "tag", value_name = "TAG")]
+    #[arg(short, long = "tag", value_name = "TAG", add = ArgValueCandidates::new(completions::tag_names))]
     pub tags: Vec<String>,
     /// Branch to clone [default: the remote's default branch]
     #[arg(long)]
@@ -209,7 +225,7 @@ pub struct ScanArgs {
     #[arg(value_hint = ValueHint::DirPath)]
     pub dir: Option<PathBuf>,
     /// Register under this root [default: the root that contains each checkout]
-    #[arg(long, value_name = "ROOT")]
+    #[arg(long, value_name = "ROOT", add = ArgValueCandidates::new(completions::root_names))]
     pub root: Option<String>,
     /// Tag each repository with its parent directory's name
     #[arg(long)]
@@ -221,17 +237,21 @@ pub struct ScanArgs {
     /// Show what would be registered without registering it
     #[arg(long)]
     pub dry_run: bool,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
 }
 
 #[derive(Debug, Args)]
 pub struct SyncArgs {
     /// Repositories to sync [default: every enabled repository]
+    #[arg(add = ArgValueCandidates::new(completions::repo_names))]
     pub names: Vec<String>,
     /// Only repositories with this tag; repeat to allow several
-    #[arg(short, long = "tag", value_name = "TAG")]
+    #[arg(short, long = "tag", value_name = "TAG", add = ArgValueCandidates::new(completions::tag_names))]
     pub tags: Vec<String>,
     /// Only repositories under this root
-    #[arg(long, value_name = "ROOT")]
+    #[arg(long, value_name = "ROOT", add = ArgValueCandidates::new(completions::root_names))]
     pub root: Option<String>,
     /// How many repositories to sync at once [default: sync.jobs]
     #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=64))]
@@ -259,10 +279,10 @@ pub struct SyncArgs {
 #[derive(Debug, Args)]
 pub struct ListArgs {
     /// Only repositories with this tag; repeat to allow several
-    #[arg(short, long = "tag", value_name = "TAG")]
+    #[arg(short, long = "tag", value_name = "TAG", add = ArgValueCandidates::new(completions::tag_names))]
     pub tags: Vec<String>,
     /// Only repositories under this root
-    #[arg(long, value_name = "ROOT")]
+    #[arg(long, value_name = "ROOT", add = ArgValueCandidates::new(completions::root_names))]
     pub root: Option<String>,
     /// Output format
     #[arg(long, value_enum, default_value_t = Format::Text)]
@@ -272,12 +292,13 @@ pub struct ListArgs {
 #[derive(Debug, Args)]
 pub struct StatusArgs {
     /// Repositories to inspect [default: all]
+    #[arg(add = ArgValueCandidates::new(completions::repo_names))]
     pub names: Vec<String>,
     /// Only repositories with this tag; repeat to allow several
-    #[arg(short, long = "tag", value_name = "TAG")]
+    #[arg(short, long = "tag", value_name = "TAG", add = ArgValueCandidates::new(completions::tag_names))]
     pub tags: Vec<String>,
     /// Only repositories under this root
-    #[arg(long, value_name = "ROOT")]
+    #[arg(long, value_name = "ROOT", add = ArgValueCandidates::new(completions::root_names))]
     pub root: Option<String>,
     /// Output format
     #[arg(long, value_enum, default_value_t = Format::Text)]
@@ -286,12 +307,17 @@ pub struct StatusArgs {
 
 #[derive(Debug, Args)]
 pub struct ShowArgs {
+    #[arg(add = ArgValueCandidates::new(completions::repo_names))]
     pub name: String,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
 }
 
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("change").required(true).multiple(true)))]
 pub struct SetArgs {
+    #[arg(add = ArgValueCandidates::new(completions::repo_names))]
     pub name: String,
     /// Rename the repository
     #[arg(long = "name", value_name = "NEW_NAME", group = "change")]
@@ -309,7 +335,7 @@ pub struct SetArgs {
     #[arg(long, group = "change")]
     pub path: Option<String>,
     /// Move the record to another root. No files are moved.
-    #[arg(long, value_name = "ROOT", group = "change")]
+    #[arg(long, value_name = "ROOT", group = "change", add = ArgValueCandidates::new(completions::root_names))]
     pub root: Option<String>,
     /// Partial clone filter for future clones
     #[arg(
@@ -339,19 +365,22 @@ pub struct SetArgs {
 
 #[derive(Debug, Args)]
 pub struct TagArgs {
+    #[arg(add = ArgValueCandidates::new(completions::repo_names))]
     pub name: String,
     /// +TAG adds a tag, -TAG removes one, and a bare TAG adds it.
     /// With none, print the repository's tags.
     #[arg(
         value_name = "+TAG|-TAG",
         allow_hyphen_values = true,
-        trailing_var_arg = true
+        trailing_var_arg = true,
+        add = ArgValueCompleter::new(completions::tag_changes)
     )]
     pub changes: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
+    #[arg(add = ArgValueCandidates::new(completions::repo_names))]
     pub name: String,
     /// Also delete the checkout from disk, after a confirmation
     #[arg(long)]
@@ -365,6 +394,7 @@ pub struct RemoveArgs {
 pub enum HookCommand {
     /// Attach a shell command that runs after the repository syncs
     Add {
+        #[arg(add = ArgValueCandidates::new(completions::repo_names))]
         repo: String,
         #[arg(value_hint = ValueHint::CommandString)]
         command: String,
@@ -377,10 +407,19 @@ pub enum HookCommand {
     },
     /// List hooks, of one repository or of all
     #[command(visible_alias = "ls")]
-    List { repo: Option<String> },
+    List {
+        #[arg(add = ArgValueCandidates::new(completions::repo_names))]
+        repo: Option<String>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
     /// Remove a hook by the id that `vuta hook list` shows
     #[command(visible_alias = "rm")]
-    Remove { id: i64 },
+    Remove {
+        #[arg(add = ArgValueCandidates::new(completions::hook_ids))]
+        id: i64,
+    },
 }
 
 fn platform_parser() -> impl TypedValueParser<Value = Platform> {
@@ -391,6 +430,7 @@ fn platform_parser() -> impl TypedValueParser<Value = Platform> {
 #[derive(Debug, Args)]
 pub struct LogArgs {
     /// Show this repository's results instead of whole runs
+    #[arg(add = ArgValueCandidates::new(completions::repo_names))]
     pub name: Option<String>,
     /// How many runs (or results) to show
     #[arg(short = 'n', long, value_name = "N", default_value_t = 10,
@@ -423,19 +463,36 @@ pub struct ImportArgs {
     /// Show what would be imported without changing anything
     #[arg(long)]
     pub dry_run: bool,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     /// Print one setting's value
-    Get { key: String },
+    Get {
+        #[arg(add = ArgValueCandidates::new(completions::setting_keys))]
+        key: String,
+    },
     /// Change a setting
-    Set { key: String, value: String },
+    Set {
+        #[arg(add = ArgValueCandidates::new(completions::setting_keys))]
+        key: String,
+        value: String,
+    },
     /// Return a setting to its default
-    Unset { key: String },
+    Unset {
+        #[arg(add = ArgValueCandidates::new(completions::setting_keys))]
+        key: String,
+    },
     /// Show every setting with its value
     #[command(visible_alias = "ls")]
-    List,
+    List {
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
 }
 
 #[derive(Debug, Subcommand)]

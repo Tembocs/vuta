@@ -10,17 +10,21 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::anyhow;
+use serde_json::{Value, json};
 
-use super::{Ctx, absolute, check_label, root_by_name, root_or_default, tracer};
+use super::{
+    Ctx, absolute, check_label, current_dir, offer_first_root, print_json, root_by_name,
+    root_or_default, root_or_first, tracer,
+};
 use crate::Error;
-use crate::cli::ScanArgs;
+use crate::cli::{Format, ScanArgs};
 use crate::db;
 use crate::db::repos::{NewRepo, Selection};
 use crate::model::{Root, VcsKind};
 use crate::paths;
-use crate::ui::Styled;
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
+use crate::ui::{Styled, json as ui_json};
 use crate::vcs::{self, Vcs, remote};
 
 /// What the scan decided for one checkout.
@@ -34,6 +38,9 @@ enum Found {
     },
     Known,
     Skip {
+        /// The checkout's absolute path.
+        path: PathBuf,
+        /// How the text output names it: `root:rel/path` when known.
         what: String,
         reason: String,
     },
@@ -47,13 +54,20 @@ pub fn run(ctx: &mut Ctx, args: &ScanArgs) -> Result<ExitCode, Error> {
         Some(name) => Some(root_by_name(&conn, name)?),
         None => None,
     };
+    // With no roots yet, a person at a terminal may make the directory
+    // being scanned the first one. A dry run changes nothing, so it only
+    // says how to add one.
     let dir = match (&args.dir, &only_root) {
         (Some(dir), _) => absolute(dir)?,
         (None, Some(root)) => root.path.clone(),
-        (None, None) => root_or_default(&conn, None)?.path,
+        (None, None) if args.dry_run => root_or_default(&conn, None)?.path,
+        (None, None) => root_or_first(ui, &conn, None, current_dir)?.path,
     };
     if !dir.is_dir() {
         return Err(anyhow!("{} is not a directory", dir.display()).into());
+    }
+    if only_root.is_none() && args.dir.is_some() && !args.dry_run {
+        offer_first_root(ui, &conn, || Ok(dir.clone()))?;
     }
     let roots = match &only_root {
         Some(root) => vec![root.clone()],
@@ -89,10 +103,14 @@ pub fn run(ctx: &mut Ctx, args: &ScanArgs) -> Result<ExitCode, Error> {
         .collect();
 
     let mut table = Table::new(["RESULT", "NAME", "PATH", "DETAIL"]);
+    let (mut added_json, mut skipped_json) = (Vec::new(), Vec::new());
     let (mut added, mut skipped, mut already) = (0, 0, 0);
+    let skip_json =
+        |path: &Path, reason: &str| json!({ "path": ui_json::path_text(path), "reason": reason });
     for (path, reason) in unreadable {
         skipped += 1;
         table.push(skip_row(&path.display().to_string(), &reason));
+        skipped_json.push(skip_json(&path, &reason));
     }
     for path in checkouts {
         let found = classify(
@@ -106,9 +124,10 @@ pub fn run(ctx: &mut Ctx, args: &ScanArgs) -> Result<ExitCode, Error> {
         );
         match found {
             Found::Known => already += 1,
-            Found::Skip { what, reason } => {
+            Found::Skip { path, what, reason } => {
                 skipped += 1;
                 table.push(skip_row(&what, &reason));
+                skipped_json.push(skip_json(&path, &reason));
             }
             Found::Add {
                 name,
@@ -135,6 +154,14 @@ pub fn run(ctx: &mut Ctx, args: &ScanArgs) -> Result<ExitCode, Error> {
                 }
                 added += 1;
                 taken.insert(name.to_lowercase(), name.clone());
+                added_json.push(json!({
+                    "name": name,
+                    "root": root.name,
+                    "rel_path": rel_path,
+                    "path": ui_json::path_text(&path),
+                    "url": url,
+                    "tags": tags,
+                }));
                 let mut detail = url;
                 if !tags.is_empty() {
                     detail = format!("{detail}  tags: {}", tags.join(","));
@@ -149,6 +176,19 @@ pub fn run(ctx: &mut Ctx, args: &ScanArgs) -> Result<ExitCode, Error> {
         }
     }
 
+    if args.format == Format::Json {
+        print_json(
+            ui,
+            &json!({
+                "dir": ui_json::path_text(&dir),
+                "dry_run": args.dry_run,
+                "added": Value::Array(added_json),
+                "already_registered": already,
+                "skipped": Value::Array(skipped_json),
+            }),
+        )?;
+        return Ok(ExitCode::SUCCESS);
+    }
     if !table.is_empty() {
         ui.table(&table);
         ui.blank();
@@ -270,6 +310,7 @@ fn classify(
 ) -> Found {
     let what = path.display().to_string();
     let skip = |reason: String| Found::Skip {
+        path: path.to_path_buf(),
         what: what.clone(),
         reason,
     };
@@ -284,6 +325,7 @@ fn classify(
     }
     let what = format!("{}:{rel_path}", root.name);
     let skip = |reason: String| Found::Skip {
+        path: path.to_path_buf(),
         what: what.clone(),
         reason,
     };

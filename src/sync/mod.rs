@@ -12,7 +12,8 @@ use std::collections::VecDeque;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,9 @@ pub enum Event {
     },
     /// A git command finished. Only sent when `Options::trace` is set.
     Trace(Captured),
+    /// Time passed. Sent every `Options::tick` while repositories are
+    /// syncing, so live progress can show how long each has taken.
+    Tick,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -48,6 +52,8 @@ pub struct Options {
     pub fetch_only: bool,
     /// Send `Event::Trace` for every git command (`--verbose`).
     pub trace: bool,
+    /// Send `Event::Tick` this often. `None` sends none.
+    pub tick: Option<Duration>,
 }
 
 enum Message {
@@ -110,10 +116,30 @@ pub fn run(jobs: Vec<Job>, options: &Options, stop: &AtomicBool, mut on_event: i
         // The tracer holds a sender too, so the channel never closes on its
         // own; count finished workers instead.
         let mut done = 0;
-        for message in &rx {
+        let mut next_tick = options.tick.map(|tick| Instant::now() + tick);
+        loop {
+            let message = match next_tick {
+                Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                    Ok(message) => Some(message),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                },
+                None => match rx.recv() {
+                    Ok(message) => Some(message),
+                    Err(_) => break,
+                },
+            };
+            // Ticks keep their pace even while other events stream in.
+            if let (Some(at), Some(tick)) = (next_tick, options.tick)
+                && Instant::now() >= at
+            {
+                on_event(Event::Tick);
+                next_tick = Some(Instant::now() + tick);
+            }
             match message {
-                Message::Event(event) => on_event(event),
-                Message::WorkerDone => {
+                None => {}
+                Some(Message::Event(event)) => on_event(event),
+                Some(Message::WorkerDone) => {
                     done += 1;
                     if done == workers {
                         break;
@@ -208,6 +234,7 @@ mod tests {
             workers,
             fetch_only: false,
             trace,
+            tick: None,
         }
     }
 
@@ -237,6 +264,7 @@ mod tests {
                 }
                 Event::Cloning { .. } => {}
                 Event::Trace(_) => panic!("trace without trace option"),
+                Event::Tick => panic!("tick without tick option"),
             }
         }
         assert_eq!(finished.len(), 5);
@@ -275,6 +303,30 @@ mod tests {
         );
         assert_eq!(events, 0);
         assert!(!fixture.path("work").exists());
+    }
+
+    #[test]
+    fn ticks_are_sent_when_asked() {
+        let fixture = Fixture::new();
+        let mut ticks = 0;
+        let mut finished = 0;
+        let options = Options {
+            tick: Some(Duration::from_millis(1)),
+            ..options(2, false)
+        };
+        run(
+            jobs(&fixture, 2),
+            &options,
+            &AtomicBool::new(false),
+            |e| match e {
+                Event::Tick => ticks += 1,
+                Event::Finished { .. } => finished += 1,
+                _ => {}
+            },
+        );
+        // Two clones take far longer than a millisecond.
+        assert!(ticks > 0);
+        assert_eq!(finished, 2);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use anyhow::anyhow;
 
 use super::sync::{HookMode, Plan};
-use super::{Ctx, check_label, location, rel_path, root_or_default, stored_url};
+use super::{Ctx, check_label, current_dir, location, rel_path, root_or_first, stored_url};
 use crate::Error;
 use crate::cli::{AddArgs, Format};
 use crate::db;
@@ -22,7 +22,6 @@ pub fn run(ctx: &mut Ctx, args: &AddArgs) -> Result<ExitCode, Error> {
     let conn = ctx.open_db()?;
     let ui = &*ctx.ui;
 
-    let root = root_or_default(&conn, args.root.as_deref())?;
     let name = match &args.name {
         Some(name) => name.clone(),
         None => remote::infer_name(&args.url)
@@ -32,6 +31,9 @@ pub fn run(ctx: &mut Ctx, args: &AddArgs) -> Result<ExitCode, Error> {
     for tag in &args.tags {
         check_label("tag", tag)?;
     }
+    // With no roots yet, a person at a terminal may make this directory
+    // the first one; checked after the arguments, so a typo creates none.
+    let root = root_or_first(ui, &conn, args.root.as_deref(), current_dir)?;
     if let Some(existing) = db::repos::by_name(&conn, &name)? {
         return Err(anyhow!(
             "a repository named '{}' already exists; choose another name with --name",

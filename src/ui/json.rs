@@ -1,7 +1,9 @@
 //! The JSON shapes of `--format json`, defined in one place.
 //!
 //! Every command prints exactly one JSON value on stdout: an array for
-//! listings, an object for `vuta sync`. Fields follow these rules, which
+//! listings, an object for `show`, `sync`, `scan` and `import`. The shapes
+//! that only one command prints are built in that command. Fields follow
+//! these rules, which
 //! docs/ARCHITECTURE.md section 9 repeats for script authors:
 //!
 //! - Keys are `snake_case`. A field that has no value is `null`, never
@@ -16,7 +18,8 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::model::{RepoEntry, Run, RunResult, Tally};
+use crate::db::settings::{Known, Setting};
+use crate::model::{Hook, RepoEntry, Root, Run, RunResult, Tally};
 
 /// A repository as `vuta list` shows it.
 pub fn repo(entry: &RepoEntry, path: &Path) -> Value {
@@ -78,6 +81,42 @@ pub fn result(result: &RunResult) -> Value {
         "duration_ms": result.duration_ms,
         "hook_outcome": result.hook_outcome.map(|h| h.as_str()),
         "message": result.message,
+    })
+}
+
+/// A root as `vuta root list` shows it. `exists` says whether its
+/// directory is there.
+pub fn root(root: &Root, repos: u32) -> Value {
+    json!({
+        "name": root.name,
+        "path": path_text(&root.path),
+        "default": root.is_default,
+        "repos": repos,
+        "exists": root.path.is_dir(),
+    })
+}
+
+/// A hook of the repository named `repo`. `platform` and `when` use the
+/// same strings as `vuta export`.
+pub fn hook(repo: &str, hook: &Hook) -> Value {
+    json!({
+        "id": hook.id,
+        "repo": repo,
+        "command": hook.command,
+        "platform": hook.platform.as_str(),
+        "when": hook.run_when.as_str(),
+        "enabled": hook.enabled,
+    })
+}
+
+/// A setting with its current value and its default.
+pub fn setting(setting: &Setting, known: &Known) -> Value {
+    json!({
+        "key": setting.key,
+        "value": setting.value,
+        "default": known.default,
+        "is_default": setting.is_default,
+        "description": known.help,
     })
 }
 

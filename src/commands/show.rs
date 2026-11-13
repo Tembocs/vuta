@@ -3,16 +3,17 @@
 use std::process::ExitCode;
 
 use super::{
-    Ctx, checkout_path, now_unix, repo_by_name, root_of, stored_detail, stored_hooks, stored_status,
+    Ctx, checkout_path, now_unix, print_json, repo_by_name, root_of, stored_detail, stored_hooks,
+    stored_status,
 };
 use crate::Error;
-use crate::cli::ShowArgs;
+use crate::cli::{Format, ShowArgs};
 use crate::db;
 use crate::db::repos::Selection;
 use crate::model::{OutcomeKind, short_rev};
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
-use crate::ui::{Styled, fmt_age, pad, report};
+use crate::ui::{Styled, fmt_age, json, pad, report};
 
 /// How many recent results to show.
 const RECENT: u32 = 10;
@@ -39,6 +40,16 @@ pub fn run(ctx: &mut Ctx, args: &ShowArgs) -> Result<ExitCode, Error> {
     .into_iter()
     .next()
     .ok_or_else(|| Error::UnknownRepo(args.name.clone()))?;
+    if args.format == Format::Json {
+        // The fields of `vuta list`, then the hooks and recent results.
+        let mut value = json::repo(&entry, &path);
+        let hooks = db::hooks::for_repo(&conn, repo.id)?;
+        value["hooks"] = hooks.iter().map(|h| json::hook(&repo.name, h)).collect();
+        let results = db::runs::results_for_repo(&conn, repo.id, RECENT)?;
+        value["results"] = results.iter().map(json::result).collect();
+        print_json(ui, &value)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let field = |label: &str, value: &Styled| {
         let mut line = Styled::new();
         line.push(&pad(label, LABEL), THEME.muted).append(value);

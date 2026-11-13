@@ -395,10 +395,8 @@ mod tests {
     fn completions_go_where_debian_shells_look() {
         for (shell, path) in COMPLETIONS {
             assert!(path.starts_with("usr/share/"), "{path}");
-            assert!(
-                completions::script(*shell).contains("fetch-only"),
-                "{shell}"
-            );
+            // The script registers vuta, which completes itself on TAB.
+            assert!(completions::script(*shell).contains("COMPLETE"), "{shell}");
         }
     }
 

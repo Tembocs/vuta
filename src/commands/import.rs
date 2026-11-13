@@ -24,17 +24,18 @@ use std::process::ExitCode;
 
 use anyhow::{anyhow, bail};
 use rusqlite::Connection;
+use serde_json::{Value, json};
 
-use super::{Ctx, absolute, check_label, rel_path, repositories};
+use super::{Ctx, absolute, check_label, print_json, rel_path, repositories};
 use crate::Error;
-use crate::cli::ImportArgs;
+use crate::cli::{Format, ImportArgs};
 use crate::db;
 use crate::db::repos::{Changes, NewRepo, Selection};
 use crate::model::{Platform, Root, RunWhen, VcsKind, count};
 use crate::transfer::{Registry, RepoRecord};
-use crate::ui::Styled;
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
+use crate::ui::{Styled, json as ui_json};
 use crate::vcs::remote;
 
 /// Where one of the file's roots goes.
@@ -115,11 +116,19 @@ pub fn run(ctx: &mut Ctx, args: &ImportArgs) -> Result<ExitCode, Error> {
 
     let mappings = parse_mappings(&args.map_roots)?;
     let plan = plan(&conn, &registry, &mappings, !args.no_hooks)?;
-    show(ui, &plan);
+    let text = args.format == Format::Text;
+    if text {
+        show(ui, &plan);
+    }
     if !args.dry_run {
         db::atomic(&conn, |conn| apply(conn, &plan))?;
     }
-    summarize(ui, &plan, args.dry_run);
+    if text {
+        summarize(ui, &plan, args.dry_run);
+    } else {
+        print_json(ui, &plan_json(&plan, args.dry_run))?;
+    }
+    notes(ui, &plan, args.dry_run);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -576,13 +585,102 @@ fn summarize(ui: &crate::ui::Ui, plan: &Plan, dry_run: bool) {
         THEME.muted,
     );
     ui.result(line);
+}
+
+/// Warnings and hints on stderr, after the plan in either format.
+fn notes(ui: &crate::ui::Ui, plan: &Plan, dry_run: bool) {
     if plan.disabled_hooks > 0 {
         ui.warn(format_args!(
             "{} left out: disabled hooks are not imported",
             count(plan.disabled_hooks as u32, "disabled hook")
         ));
     }
-    if !added.is_empty() && !dry_run {
+    let added = plan
+        .repos
+        .iter()
+        .any(|r| matches!(r.action, RepoAction::Add { .. }));
+    if added && !dry_run {
         ui.progress("nothing was cloned; clone the new repositories with: vuta sync");
     }
+}
+
+/// The plan as `--format json` prints it: every root, repository and
+/// setting of the file with what the import does with it.
+fn plan_json(plan: &Plan, dry_run: bool) -> Value {
+    let target_name = |key: &str| {
+        plan.roots
+            .iter()
+            .find(|(k, _)| k == key)
+            .map_or("", |(_, t)| t.name())
+    };
+    let roots: Vec<Value> = plan
+        .roots
+        .iter()
+        .map(|(key, target)| {
+            let (action, path) = match target {
+                RootTarget::Existing(root) => ("use", &root.path),
+                RootTarget::Create { path, .. } => ("create", path),
+            };
+            json!({
+                "name": target.name(),
+                "path": ui_json::path_text(path),
+                "action": action,
+                "becomes_default": plan.make_default.as_deref() == Some(key.as_str()),
+            })
+        })
+        .collect();
+    let repos: Vec<Value> = plan
+        .repos
+        .iter()
+        .map(|repo| {
+            let record = &repo.record;
+            let (action, reason, hooks) = match &repo.action {
+                RepoAction::Add { hooks } => ("add", None, hooks.as_slice()),
+                RepoAction::Skip(reason) => ("skip", Some(reason), &[][..]),
+            };
+            let hooks: Vec<Value> = hooks
+                .iter()
+                .map(|hook| {
+                    json!({
+                        "command": hook.command,
+                        "platform": hook.platform.as_str(),
+                        "when": hook.run_when.as_str(),
+                    })
+                })
+                .collect();
+            json!({
+                "name": record.name,
+                "root": target_name(&repo.root),
+                "rel_path": repo.rel_path,
+                "url": record.url,
+                "branch": record.branch,
+                "clone_filter": record.clone_filter,
+                "clone_depth": record.clone_depth,
+                "enabled": record.enabled,
+                "tags": record.tags,
+                "action": action,
+                "reason": reason,
+                "hooks": hooks,
+            })
+        })
+        .collect();
+    let settings: Vec<Value> = plan
+        .settings
+        .iter()
+        .map(|(key, value, action)| {
+            let (action, local) = match action {
+                SettingAction::Set => ("set", None),
+                SettingAction::Keep(local) => ("keep", Some(local)),
+                SettingAction::Unknown => ("skip", None),
+            };
+            json!({ "key": key, "value": value, "action": action, "local_value": local })
+        })
+        .collect();
+    json!({
+        "dry_run": dry_run,
+        "roots": roots,
+        "repos": repos,
+        "settings": settings,
+        "disabled_hooks": plan.disabled_hooks,
+    })
 }

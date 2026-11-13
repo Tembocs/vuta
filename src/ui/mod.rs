@@ -5,6 +5,7 @@
 //! colour when it is off, so callers always write styled text.
 
 pub mod json;
+pub mod live;
 pub mod report;
 pub mod table;
 pub mod theme;
@@ -127,6 +128,31 @@ impl Ui {
     pub fn error(&self, message: impl Display) {
         let err = THEME.err;
         anstream::eprintln!("{err}error:{err:#} {message:#}");
+    }
+
+    /// Whether live progress can be drawn: normal verbosity (quiet hides
+    /// progress, and verbose traces would interleave with it), stdout and
+    /// stderr both terminals, `TERM` not `dumb`, and on Windows a console
+    /// that handles cursor movement (Windows 10 and later).
+    pub fn can_redraw(&self) -> bool {
+        use std::io::IsTerminal as _;
+        self.verbosity == Verbosity::Normal
+            && std::io::stdout().is_terminal()
+            && std::io::stderr().is_terminal()
+            && std::env::var_os("TERM").is_none_or(|term| term != "dumb")
+            && (!cfg!(windows) || anstyle_query::windows::enable_ansi_colors() == Some(true))
+    }
+
+    /// The text of the live progress block, on stderr, exactly as given.
+    pub fn live_block(&self, text: &str) {
+        anstream::eprint!("{text}");
+    }
+
+    /// Whether someone can answer a question: stdin and stderr are both
+    /// terminals.
+    pub fn can_ask(&self) -> bool {
+        use std::io::IsTerminal as _;
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
     }
 
     /// Ask a yes-or-no question on stderr and read the answer from stdin.

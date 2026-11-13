@@ -41,6 +41,8 @@ vuta doctor                                   # check git, the database, and eve
 
 Global options: `--db <PATH>` (or `VUTA_DB`), `--color auto|always|never` (or `VUTA_COLOR`), `-q/--quiet`, `-v/--verbose`.
 
+The first `vuta add` or `vuta scan` with no root registered asks whether to use the current directory (or the directory being scanned) as the first root. Without a terminal it prints the `vuta root add` command instead. While `vuta sync` runs in a terminal, a live line per repository in progress shows what it is doing and for how long.
+
 Updates are fast-forward only. A checkout with local changes, local commits that diverge from upstream, a detached HEAD, no upstream branch or a different `origin` is skipped and left untouched. `vuta sync` exits 0 when everything succeeded, 1 when a repository or hook failed (or a repository was skipped, with `--strict`), 3 when it could not start, and 130 on Ctrl-C.
 
 ### Moving to another machine
@@ -55,7 +57,7 @@ The file holds roots, repositories, tags, hooks and changed settings, but no his
 
 ### Scripting
 
-`vuta list`, `status`, `log` and `sync` take `--format json` and then print one JSON value on stdout, with progress and hook output on stderr:
+`vuta list`, `status`, `show`, `log`, `sync`, `scan`, `import`, `root list`, `hook list` and `config list` take `--format json` and then print one JSON value on stdout, with progress and hook output on stderr:
 
 ```sh
 vuta sync --format json | jq -r '.results[] | select(.outcome == "failed") | .repo'
@@ -65,12 +67,12 @@ The fields are described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) section
 
 ### Shell completions
 
-`vuta completions <shell>` prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish`. The Debian package installs the bash, zsh and fish scripts for you. Otherwise:
+Completion covers subcommands and flags, and also the names in your registry: repositories, roots, tags, hook ids and setting keys (`vuta sync z<TAB>` gives `zed`). `vuta completions <shell>` prints a short script that registers `vuta` with `bash`, `zsh`, `fish`, `powershell` or `elvish`; on each TAB the shell asks `vuta` itself. The Debian package installs the bash, zsh and fish scripts for you. Otherwise, load the script when the shell starts, so it always matches the installed `vuta`:
 
 ```sh
-vuta completions bash > ~/.local/share/bash-completion/completions/vuta
-vuta completions zsh > ~/.zfunc/_vuta        # with fpath+=(~/.zfunc) before compinit in ~/.zshrc
-vuta completions fish > ~/.config/fish/completions/vuta.fish
+echo 'source <(vuta completions bash)' >> ~/.bashrc
+echo 'source <(vuta completions zsh)' >> ~/.zshrc      # after compinit
+echo 'vuta completions fish | source' > ~/.config/fish/completions/vuta.fish
 ```
 
 In PowerShell, add `vuta completions powershell | Out-String | Invoke-Expression` to `$PROFILE`.

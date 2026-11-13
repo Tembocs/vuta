@@ -6,6 +6,8 @@ use vuta::commands;
 use vuta::ui::{self, Ui};
 
 fn main() -> ExitCode {
+    // A shell asking for completions gets them here, before any parsing.
+    commands::completions::handle_request();
     let cli = Cli::parse();
     ui::apply_color(cli.color);
     let mut ui = Ui::new(cli.verbosity());

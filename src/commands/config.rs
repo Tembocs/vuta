@@ -2,13 +2,13 @@
 
 use std::process::ExitCode;
 
-use super::Ctx;
+use super::{Ctx, print_json};
 use crate::Error;
-use crate::cli::ConfigCommand;
+use crate::cli::{ConfigCommand, Format};
 use crate::db::settings;
-use crate::ui::Styled;
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
+use crate::ui::{Styled, json};
 
 pub fn run(ctx: &mut Ctx, cmd: &ConfigCommand) -> Result<ExitCode, Error> {
     let conn = ctx.open_db()?;
@@ -33,9 +33,18 @@ pub fn run(ctx: &mut Ctx, cmd: &ConfigCommand) -> Result<ExitCode, Error> {
                 .push(" (default)", THEME.muted);
             ui.result(line);
         }
-        ConfigCommand::List => {
+        ConfigCommand::List { format } => {
+            let settings = settings::list(&conn)?;
+            if *format == Format::Json {
+                let items = settings
+                    .iter()
+                    .zip(settings::KNOWN)
+                    .map(|(setting, known)| json::setting(setting, known));
+                print_json(ui, &serde_json::Value::Array(items.collect()))?;
+                return Ok(ExitCode::SUCCESS);
+            }
             let mut table = Table::new(["KEY", "VALUE", "DESCRIPTION"]);
-            for (setting, known) in settings::list(&conn)?.into_iter().zip(settings::KNOWN) {
+            for (setting, known) in settings.into_iter().zip(settings::KNOWN) {
                 let value = if setting.is_default {
                     Cell::new(format!("{} (default)", setting.value), THEME.muted)
                 } else {

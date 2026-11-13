@@ -13,11 +13,14 @@ members = ["xtask"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive", "env"] }
-clap_complete = "4.6"
+# The dynamic engine (`unstable-dynamic`) completes names from the registry.
+# It is unstable, so the version is pinned; see src/commands/completions.rs.
+clap_complete = { version = "=4.6.11", features = ["unstable-dynamic"] }
 rusqlite = { version = "0.42", features = ["bundled"] }
 directories = "6"
 anstream = "1"
 anstyle = "1"
+anstyle-query = "1"
 thiserror = "2"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

@@ -5,14 +5,14 @@ use std::process::ExitCode;
 
 use anyhow::anyhow;
 
-use super::{Ctx, repo_by_name};
+use super::{Ctx, print_json, repo_by_name};
 use crate::Error;
-use crate::cli::HookCommand;
+use crate::cli::{Format, HookCommand};
 use crate::db;
 use crate::model::RunWhen;
-use crate::ui::Styled;
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
+use crate::ui::{Styled, json};
 
 pub fn run(ctx: &mut Ctx, cmd: &HookCommand) -> Result<ExitCode, Error> {
     let conn = ctx.open_db()?;
@@ -49,7 +49,7 @@ pub fn run(ctx: &mut Ctx, cmd: &HookCommand) -> Result<ExitCode, Error> {
                 ));
             }
         }
-        HookCommand::List { repo } => {
+        HookCommand::List { repo, format } => {
             let hooks = match repo {
                 Some(name) => {
                     let repo = repo_by_name(&conn, name)?;
@@ -60,6 +60,11 @@ pub fn run(ctx: &mut Ctx, cmd: &HookCommand) -> Result<ExitCode, Error> {
                 }
                 None => db::hooks::all(&conn)?,
             };
+            if *format == Format::Json {
+                let items = hooks.iter().map(|(name, hook)| json::hook(name, hook));
+                print_json(ui, &serde_json::Value::Array(items.collect()))?;
+                return Ok(ExitCode::SUCCESS);
+            }
             if hooks.is_empty() {
                 ui.progress("no hooks; add one with: vuta hook add <repo> <command>");
                 return Ok(ExitCode::SUCCESS);

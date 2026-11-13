@@ -87,8 +87,26 @@ fn unknown_names_exit_3_with_one_line() {
 #[test]
 fn add_needs_a_root() {
     let env = Env::new();
-    let out = env.code(3, &["add", ZED, "--no-clone"]);
-    assert!(stderr(&out).contains("vuta root add"), "{}", stderr(&out));
+    // Without a terminal there is no question, only the command to run,
+    // naming the current directory.
+    let code = env.dir.path().join("code");
+    std::fs::create_dir_all(&code).unwrap();
+    let out = env
+        .vuta()
+        .args(["add", ZED, "--no-clone"])
+        .current_dir(&code)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "error: no roots registered; add one with: vuta root add code {}\n",
+            arg(&code)
+        )
+    );
+    assert!(stdout(&out).is_empty());
+    assert!(db::roots::all(&env.conn()).unwrap().is_empty());
 }
 
 #[test]
@@ -555,6 +573,18 @@ fn scan_needs_a_root() {
     let env = Env::new();
     let out = env.code(3, &["scan"]);
     assert!(stderr(&out).contains("vuta root add"), "{}", stderr(&out));
+    // Scanning a directory suggests that directory as the root.
+    let tree = env.dir.path().join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    let out = env.code(3, &["scan", arg(&tree)]);
+    assert!(
+        stderr(&out).contains(&format!("vuta root add tree {}", arg(&tree))),
+        "{}",
+        stderr(&out)
+    );
+    let out = env.code(3, &["scan", "--dry-run"]);
+    assert!(stderr(&out).contains("vuta root add"), "{}", stderr(&out));
+    assert!(db::roots::all(&env.conn()).unwrap().is_empty());
 }
 
 #[test]
@@ -954,4 +984,199 @@ fn import_dry_run_and_errors_change_nothing() {
         stderr(&out)
     );
     assert!(names(&b).is_empty());
+}
+
+#[test]
+fn show_as_json() {
+    let env = Env::with_root();
+    let fixture = Fixture::new();
+    env.ok(&["add", &fixture.url(), "--name", "lib", "-t", "rust"]);
+    env.ok(&["hook", "add", "lib", "make", "--always"]);
+
+    let show = json(&env.ok(&["show", "lib", "--format", "json"]));
+    // The fields of `vuta list`...
+    assert_eq!(show["name"], "lib");
+    assert_eq!(show["root"], "src");
+    assert_eq!(show["tags"], serde_json::json!(["rust"]));
+    assert_eq!(show["last_outcome"], "cloned");
+    // ...then hooks and recent results.
+    let hooks = show["hooks"].as_array().unwrap();
+    assert_eq!(hooks.len(), 1);
+    assert_eq!(hooks[0]["command"], "make");
+    assert_eq!(hooks[0]["when"], "always");
+    let results = show["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["outcome"], "cloned");
+    assert_eq!(results[0]["new_rev"], show["last_rev"]);
+
+    let out = env.code(3, &["show", "nope", "--format", "json"]);
+    assert!(stdout(&out).is_empty());
+}
+
+#[test]
+fn roots_hooks_and_settings_as_json() {
+    let env = Env::with_root();
+    assert_eq!(
+        json(&env.ok(&["hook", "list", "--format", "json"])),
+        serde_json::json!([])
+    );
+    let gone = env.dir.path().join("gone");
+    env.ok(&["root", "add", "gone", arg(&gone)]);
+    std::fs::create_dir_all(env.root()).unwrap();
+    env.ok(&["add", ZED, "--no-clone"]);
+    env.ok(&["add", V, "--no-clone"]);
+    env.ok(&["hook", "add", "v", "make", "--platform", "unix"]);
+    env.ok(&["hook", "add", "zed", "cargo build"]);
+    env.ok(&["config", "set", "sync.jobs", "8"]);
+
+    let roots = json(&env.ok(&["root", "list", "--format", "json"]));
+    assert_eq!(
+        roots,
+        serde_json::json!([
+            { "name": "gone", "path": arg(&gone), "default": false, "repos": 0, "exists": false },
+            { "name": "src", "path": arg(&env.root()), "default": true, "repos": 2, "exists": true },
+        ])
+    );
+
+    let hooks = json(&env.ok(&["hook", "list", "--format", "json"]));
+    let hooks = hooks.as_array().unwrap();
+    assert_eq!(hooks.len(), 2);
+    let v = hooks.iter().find(|h| h["repo"] == "v").unwrap();
+    assert_eq!(v["command"], "make");
+    assert_eq!(v["platform"], "unix");
+    assert_eq!(v["when"], "changed");
+    assert_eq!(v["enabled"], true);
+    assert!(v["id"].is_i64());
+    let only_zed = json(&env.ok(&["hook", "list", "zed", "--format", "json"]));
+    assert_eq!(only_zed.as_array().unwrap().len(), 1);
+    assert_eq!(only_zed[0]["command"], "cargo build");
+
+    let settings = json(&env.ok(&["config", "list", "--format", "json"]));
+    let jobs = settings
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == "sync.jobs")
+        .unwrap();
+    assert_eq!(jobs["value"], "8");
+    assert_eq!(jobs["default"], "4");
+    assert_eq!(jobs["is_default"], false);
+    assert!(jobs["description"].is_string());
+    let glyphs = settings
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == "ui.glyphs")
+        .unwrap();
+    assert_eq!(glyphs["is_default"], true);
+}
+
+#[test]
+fn scan_as_json() {
+    let env = Env::with_root();
+    let fixture = Fixture::new();
+    checkout_claiming(&env, &fixture, "rust/zed", ZED);
+    let lonely = env.checkout("misc/lonely");
+    std::fs::create_dir_all(&lonely).unwrap();
+    common::git(&lonely, &["init", "-q"]);
+
+    let dry = json(&env.ok(&["scan", "--tag-from-parent", "--dry-run", "--format", "json"]));
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(dry["dir"], arg(&env.root()));
+    assert_eq!(
+        dry["added"],
+        serde_json::json!([{
+            "name": "zed",
+            "root": "src",
+            "rel_path": "rust/zed",
+            "path": arg(&env.checkout("rust/zed")),
+            "url": ZED,
+            "tags": ["rust"],
+        }])
+    );
+    assert_eq!(dry["skipped"][0]["path"], arg(&lonely));
+    assert_eq!(dry["skipped"][0]["reason"], "no origin remote");
+    assert!(names(&env).is_empty());
+
+    let out = json(&env.ok(&["scan", "--format", "json"]));
+    assert_eq!(out["dry_run"], false);
+    assert_eq!(out["added"].as_array().unwrap().len(), 1);
+    assert_eq!(names(&env), ["zed"]);
+
+    let again = json(&env.ok(&["scan", "--format", "json"]));
+    assert_eq!(again["added"], serde_json::json!([]));
+    assert_eq!(again["already_registered"], 1);
+}
+
+#[test]
+fn import_plan_as_json() {
+    let a = machine_a();
+    let file = export_file(&a);
+    let b = Env::new();
+    let src = b.dir.path().join("src");
+    let work = b.dir.path().join("work");
+    let args = |dry_run: bool| {
+        let mut args = vec![
+            "import".to_owned(),
+            arg(&file).to_owned(),
+            "--map-root".to_owned(),
+            format!("src={}", arg(&src)),
+            "--map-root".to_owned(),
+            format!("work={}", arg(&work)),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ];
+        if dry_run {
+            args.push("--dry-run".to_owned());
+        }
+        args
+    };
+    let run = |dry_run: bool| {
+        let args = args(dry_run);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        b.ok(&args)
+    };
+
+    let plan = json(&run(true));
+    assert_eq!(plan["dry_run"], true);
+    assert!(names(&b).is_empty());
+    let roots = plan["roots"].as_array().unwrap();
+    let src_root = roots.iter().find(|r| r["name"] == "src").unwrap();
+    assert_eq!(src_root["action"], "create");
+    assert_eq!(src_root["path"], arg(&src));
+    assert_eq!(src_root["becomes_default"], true);
+    let repos = plan["repos"].as_array().unwrap();
+    assert_eq!(repos.len(), 3);
+    let v = repos.iter().find(|r| r["name"] == "v").unwrap();
+    assert_eq!(v["action"], "add");
+    assert_eq!(v["reason"], serde_json::Value::Null);
+    assert_eq!(v["root"], "src");
+    assert_eq!(v["rel_path"], "v/v");
+    assert_eq!(v["clone_filter"], "blob:none");
+    assert_eq!(v["hooks"].as_array().unwrap().len(), 2);
+    assert_eq!(v["hooks"][0]["platform"], "unix");
+    let tools = repos.iter().find(|r| r["name"] == "tools").unwrap();
+    assert_eq!(tools["enabled"], false);
+    assert_eq!(tools["clone_depth"], 1);
+    assert_eq!(
+        plan["settings"],
+        serde_json::json!([
+            { "key": "sync.jobs", "value": "8", "action": "set", "local_value": null }
+        ])
+    );
+
+    // The real import prints the same plan; a second one skips everything.
+    let done = json(&run(false));
+    assert_eq!(done["dry_run"], false);
+    assert_eq!(done["repos"], plan["repos"]);
+    assert_eq!(names(&b).len(), 3);
+    let again = json(&run(false));
+    assert!(
+        again["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["action"] == "skip" && r["reason"] == "already registered")
+    );
+    assert_eq!(again["roots"][0]["action"], "use");
 }

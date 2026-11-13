@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use serde_json::json;
@@ -24,10 +24,14 @@ use crate::model::{HookOutcome, Outcome, RepoEntry, Tally};
 use crate::paths;
 use crate::sync::hooks::{self, HookContext, HookEvent};
 use crate::sync::{self, Event, Job};
+use crate::ui::live::Live;
 use crate::ui::report::ResultLine;
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
 use crate::ui::{Ui, Verbosity, json as ui_json};
+
+/// How often live progress redraws its elapsed times.
+const LIVE_TICK: Duration = Duration::from_millis(500);
 
 /// Which hooks a run starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,14 +250,30 @@ pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error
     let mut tally = Tally::default();
     let mut finished: Vec<Finished> = Vec::with_capacity(total);
     let mut db_error = None;
+    // On a terminal, a live line per busy worker; otherwise only the dim
+    // "cloning" line, since clones can take minutes.
+    let mut live = (text && ui.can_redraw()).then(|| Live::new(ui, total, name_width));
     let options = sync::Options {
         workers,
         fetch_only: plan.fetch_only,
         trace: ui.verbosity() == Verbosity::Verbose,
+        tick: live.is_some().then_some(LIVE_TICK),
     };
     sync::run(jobs, &options, stop, |event| match event {
-        Event::Started { .. } => {}
-        Event::Cloning { repo_id } => ui.clone_started(&names[&repo_id]),
+        Event::Started { repo_id } => {
+            if let Some(live) = &mut live {
+                live.started(repo_id, &names[&repo_id]);
+            }
+        }
+        Event::Cloning { repo_id } => match &mut live {
+            Some(live) => live.cloning(repo_id),
+            None => ui.clone_started(&names[&repo_id]),
+        },
+        Event::Tick => {
+            if let Some(live) = &mut live {
+                live.tick();
+            }
+        }
         Event::Trace(captured) => ui.trace(&captured),
         Event::Finished {
             repo_id,
@@ -262,14 +282,18 @@ pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error
         } => {
             tally.add(outcome.kind());
             if text {
-                ui.sync_result(&ResultLine {
+                let line = ResultLine {
                     index: tally.total() as usize,
                     total,
                     name: &names[&repo_id],
                     name_width,
                     outcome: &outcome,
                     duration,
-                });
+                };
+                match &mut live {
+                    Some(live) => live.finished(repo_id, &line),
+                    None => ui.sync_result(&line),
+                }
             }
             match db::runs::record_result(conn, run_id, repo_id, &outcome, duration) {
                 Ok(result_id) => finished.push(Finished {
@@ -285,6 +309,9 @@ pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error
             }
         }
     });
+    // Every repository finished, so the block is empty already; this makes
+    // sure nothing is left before hooks stream their output.
+    drop(live);
     if let Some(err) = db_error {
         return Err(err.into());
     }

@@ -1,8 +1,9 @@
-//! Sync result lines, hook lines and the summary line.
+//! Sync result lines, live progress lines, hook lines and the summary line.
 //!
 //! ```text
 //! [2/9] ✓ updated     zed         3f9a2c1 → 8be04d7   42 commits       6.1s
 //! [3/9] ! skipped     edit        local changes; 3 commits behind      0.9s
+//!       ▸ cloning     surrealdb   12s
 //! ```
 
 use std::time::Duration;
@@ -163,6 +164,72 @@ fn strip_git_prefix(line: &str) -> &str {
         .unwrap_or(line)
 }
 
+/// What a worker is doing, as a live progress line shows it.
+#[derive(Debug, Clone, Copy)]
+pub struct LiveLine<'a> {
+    /// The run's repository count, so the line lines up with result lines.
+    pub total: usize,
+    pub name: &'a str,
+    pub name_width: usize,
+    pub cloning: bool,
+    pub elapsed: Duration,
+    /// The line is cut to this many characters, so it never wraps.
+    pub max_width: usize,
+}
+
+/// `      ▸ cloning     zed         12s`, in the columns of a result line:
+/// the glyph and word where the status goes, then the name and how long
+/// the repository has taken so far.
+pub fn live_line(line: &LiveLine, glyphs: &Glyphs) -> String {
+    let digits = line.total.to_string().len();
+    let word = if line.cloning { "cloning" } else { "syncing" };
+    let elapsed = fmt_elapsed(line.elapsed);
+    // `[n/total] ` is replaced by spaces.
+    let indent = 2 * digits + 4;
+    let before_name = indent + glyphs.status_width() + 1 + STATUS_WIDTH + 2;
+    let after_name = 3 + super::text_width(&elapsed);
+    let room = line.max_width.saturating_sub(before_name + after_name);
+    let name: String = line.name.chars().take(room).collect();
+    let mut out = Styled::new();
+    out.plain(&" ".repeat(indent))
+        .push(
+            &pad(glyphs.hook_running, glyphs.status_width()),
+            THEME.muted,
+        )
+        .plain(" ")
+        .push(&pad(word, STATUS_WIDTH), THEME.muted)
+        .plain("  ")
+        .push(&pad(&name, line.name_width.min(room)), THEME.name)
+        .plain("   ")
+        .push(&elapsed, THEME.muted);
+    out.into_string()
+}
+
+/// `      ▸ and 3 more`, the last line when more workers are busy than the
+/// block shows.
+pub fn live_more_line(total: usize, more: usize, glyphs: &Glyphs) -> String {
+    let digits = total.to_string().len();
+    let mut out = Styled::new();
+    out.plain(&" ".repeat(2 * digits + 4))
+        .push(
+            &pad(glyphs.hook_running, glyphs.status_width()),
+            THEME.muted,
+        )
+        .plain(" ")
+        .push(&format!("and {more} more"), THEME.muted);
+    out.into_string()
+}
+
+/// `0s`, `12s`, then `2m05s`: whole seconds, since the line is redrawn
+/// about twice a second.
+fn fmt_elapsed(elapsed: Duration) -> String {
+    if elapsed.as_secs() < 60 {
+        format!("{}s", elapsed.as_secs())
+    } else {
+        fmt_duration(elapsed)
+    }
+}
+
 /// The dim line printed when a clone starts, since clones can take minutes.
 pub fn clone_started_line(name: &str) -> String {
     let mut out = Styled::new();
@@ -319,6 +386,39 @@ mod tests {
         for (outcome, ms, expected) in cases {
             assert_eq!(line(1, "surrealdb", &outcome, ms), expected);
         }
+    }
+
+    #[test]
+    fn live_lines_align_with_result_lines() {
+        let live = |name, cloning, secs, max_width| {
+            let line = LiveLine {
+                total: 9,
+                name,
+                name_width: 9,
+                cloning,
+                elapsed: Duration::from_secs(secs),
+                max_width,
+            };
+            strip(&live_line(&line, &Glyphs::UNICODE))
+        };
+        let result = line(1, "surrealdb", &Outcome::Cloned { rev: A.into() }, 100);
+        let cloning = live("surrealdb", true, 12, 200);
+        assert_eq!(cloning, "      ▸ cloning     surrealdb   12s");
+        // The name starts in the same column as on a result line.
+        let column = |line: &str| line[..line.find("surrealdb").unwrap()].chars().count();
+        assert_eq!(column(&result), column(&cloning));
+        assert_eq!(
+            live("zed", false, 125, 200),
+            "      ▸ syncing     zed         2m05s"
+        );
+        // A narrow terminal cuts the name, never the time.
+        let narrow = live("surrealdb", true, 3, 32);
+        assert_eq!(narrow, "      ▸ cloning     surreal   3s");
+        assert_eq!(narrow.chars().count(), 32);
+        assert_eq!(
+            strip(&live_more_line(12, 3, &Glyphs::ASCII)),
+            "        >  and 3 more"
+        );
     }
 
     #[test]

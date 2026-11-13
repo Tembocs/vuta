@@ -2,13 +2,13 @@
 
 use std::process::ExitCode;
 
-use super::{Ctx, absolute, check_label, root_by_name};
+use super::{Ctx, absolute, check_label, print_json, root_by_name};
 use crate::Error;
-use crate::cli::RootCommand;
+use crate::cli::{Format, RootCommand};
 use crate::db;
-use crate::ui::Styled;
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
+use crate::ui::{Styled, json};
 
 pub fn run(ctx: &mut Ctx, cmd: &RootCommand) -> Result<ExitCode, Error> {
     let conn = ctx.open_db()?;
@@ -38,8 +38,13 @@ pub fn run(ctx: &mut Ctx, cmd: &RootCommand) -> Result<ExitCode, Error> {
                 ));
             }
         }
-        RootCommand::List => {
+        RootCommand::List { format } => {
             let roots = db::roots::with_repo_counts(&conn)?;
+            if *format == Format::Json {
+                let items = roots.iter().map(|(root, repos)| json::root(root, *repos));
+                print_json(ui, &serde_json::Value::Array(items.collect()))?;
+                return Ok(ExitCode::SUCCESS);
+            }
             if roots.is_empty() {
                 ui.progress("no roots registered; add one with: vuta root add <name> <path>");
                 return Ok(ExitCode::SUCCESS);

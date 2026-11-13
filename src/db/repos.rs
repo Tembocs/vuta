@@ -255,6 +255,24 @@ pub fn remove(conn: &Connection, id: i64) -> Result<bool, DbError> {
     Ok(conn.execute("DELETE FROM repos WHERE id = ?1", [id])? > 0)
 }
 
+/// Every repository's name and `root:rel_path`, by name.
+pub fn names_and_locations(conn: &Connection) -> Result<Vec<(String, String)>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT repos.name, roots.name || ':' || repos.rel_path
+         FROM repos JOIN roots ON roots.id = repos.root_id
+         ORDER BY repos.name",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Every tag in use, with how many repositories have it, sorted.
+pub fn all_tags(conn: &Connection) -> Result<Vec<(String, u32)>, DbError> {
+    let mut stmt = conn.prepare("SELECT tag, count(*) FROM repo_tags GROUP BY tag ORDER BY tag")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// A repository's tags, sorted.
 pub fn tags(conn: &Connection, id: i64) -> Result<Vec<String>, DbError> {
     let mut stmt = conn.prepare("SELECT tag FROM repo_tags WHERE repo_id = ?1 ORDER BY tag")?;

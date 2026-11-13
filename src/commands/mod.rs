@@ -97,6 +97,22 @@ pub fn repo_by_name(conn: &Connection, name: &str) -> Result<Repo, Error> {
     crate::db::repos::by_name(conn, name)?.ok_or_else(|| Error::UnknownRepo(name.to_owned()))
 }
 
+/// The root named by `--root`; else the default root, offering the
+/// directory `dir` returns as the first root when there are none.
+pub fn root_or_first(
+    ui: &Ui,
+    conn: &Connection,
+    name: Option<&str>,
+    dir: impl FnOnce() -> Result<PathBuf, Error>,
+) -> Result<Root, Error> {
+    if name.is_none()
+        && let Some(root) = offer_first_root(ui, conn, dir)?
+    {
+        return Ok(root);
+    }
+    root_or_default(conn, name)
+}
+
 /// The root with this name, or `Error::UnknownRoot`.
 pub fn root_by_name(conn: &Connection, name: &str) -> Result<Root, Error> {
     crate::db::roots::by_name(conn, name)?.ok_or_else(|| Error::UnknownRoot(name.to_owned()))
@@ -110,6 +126,78 @@ pub fn root_or_default(conn: &Connection, name: Option<&str>) -> Result<Root, Er
             anyhow!("no default root; add one with: vuta root add <name> <path>").into()
         }),
     }
+}
+
+/// With no roots registered, offer the directory `dir` returns as the
+/// first root, named after the directory, and register it as the default
+/// when the answer is yes. Returns `None` when roots exist already.
+/// Without a terminal to ask on, or when the answer is no, this fails with
+/// the command that adds a root, so scripts never wait on a question.
+pub fn offer_first_root(
+    ui: &Ui,
+    conn: &Connection,
+    dir: impl FnOnce() -> Result<PathBuf, Error>,
+) -> Result<Option<Root>, Error> {
+    if !crate::db::roots::all(conn)?.is_empty() {
+        return Ok(None);
+    }
+    let dir = dir()?;
+    let dir = dir.as_path();
+    let name = first_root_name(dir);
+    let fix = || {
+        anyhow!(
+            "no roots registered; add one with: vuta root add {name} {}",
+            quote_arg(&dir.display().to_string())
+        )
+    };
+    if !ui.can_ask() {
+        return Err(fix().into());
+    }
+    let question = format!(
+        "No roots yet. Use {} as root '{name}', the default place for checkouts?",
+        dir.display()
+    );
+    let yes = ui
+        .confirm(question)
+        .map_err(|err| anyhow!("cannot read the answer: {err}"))?;
+    if !yes {
+        return Err(fix().into());
+    }
+    let root = crate::db::roots::add(conn, &name, dir, true)?;
+    let mut line = Styled::new();
+    line.plain("added root ")
+        .push(&root.name, THEME.name)
+        .plain(" at ")
+        .push(&root.path.display().to_string(), THEME.muted)
+        .plain(" (default)");
+    // On stderr, so stdout keeps only the command's own result or JSON.
+    ui.progress(line);
+    Ok(Some(root))
+}
+
+/// The name `offer_first_root` gives a directory: its own name when that
+/// is a valid root name, else `src`.
+pub fn first_root_name(dir: &Path) -> String {
+    dir.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| check_label("root name", name).is_ok())
+        .unwrap_or("src")
+        .to_owned()
+}
+
+/// `text` in double quotes when a shell would split it.
+fn quote_arg(text: &str) -> String {
+    if text.contains(char::is_whitespace) {
+        format!("\"{text}\"")
+    } else {
+        text.to_owned()
+    }
+}
+
+/// The current directory, for commands that default to it.
+pub fn current_dir() -> Result<PathBuf, Error> {
+    std::env::current_dir()
+        .map_err(|err| anyhow!("cannot read the current directory: {err}").into())
 }
 
 /// The root a repository lives under.
@@ -271,6 +359,16 @@ mod tests {
         for bad in ["", "+rust", "-rust", "two words", "tab\there"] {
             assert!(check_label("tag", bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn first_roots_are_named_after_their_directory() {
+        assert_eq!(first_root_name(Path::new("/home/me/code")), "code");
+        assert_eq!(first_root_name(Path::new("/home/me/my code")), "src");
+        assert_eq!(first_root_name(Path::new("/home/me/-x")), "src");
+        assert_eq!(first_root_name(Path::new("/")), "src");
+        assert_eq!(quote_arg("/home/me/my code"), "\"/home/me/my code\"");
+        assert_eq!(quote_arg("/srv/src"), "/srv/src");
     }
 
     #[test]

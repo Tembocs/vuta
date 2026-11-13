@@ -83,6 +83,25 @@ pub fn open(path: &Path) -> Result<Connection, DbError> {
     Ok(conn)
 }
 
+/// Open an existing database for reading only: never create, migrate or
+/// write it. Shell completion uses this on every TAB. A database at a newer
+/// schema version than this binary knows is refused rather than guessed at;
+/// one never migrated has no tables, so queries on it fail.
+pub fn open_read_only(path: &Path) -> Result<Connection, DbError> {
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags).map_err(|source| DbError::Open {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    conn.busy_timeout(Duration::from_millis(200))?;
+    let (found, known) = (schema_version(&conn)?, known_version());
+    if found > known {
+        return Err(DbError::SchemaTooNew { found, known });
+    }
+    Ok(conn)
+}
+
 /// The schema version recorded in the database.
 pub fn schema_version(conn: &Connection) -> Result<u32, DbError> {
     Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
