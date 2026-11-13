@@ -13,7 +13,7 @@ use tempfile::TempDir;
 #[path = "../../src/testutil.rs"]
 mod testutil;
 
-pub use testutil::{Fixture, git};
+pub use testutil::{ALLOW_FILE_SUBMODULES, Fixture, git, identify, local_commit};
 
 pub struct Env {
     pub dir: TempDir,
@@ -50,8 +50,10 @@ impl Env {
     }
 
     /// `vuta --db <temp db>` with colour-related environment cleared, so
-    /// output is plain because it is piped.
+    /// output is plain because it is piped. Git may clone submodules from
+    /// local paths, which the fixtures' submodules are.
     pub fn vuta(&self) -> Command {
+        let (key, value) = ALLOW_FILE_SUBMODULES.split_once('=').unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_vuta"));
         cmd.arg("--db")
             .arg(self.db())
@@ -59,7 +61,10 @@ impl Env {
             .env_remove("VUTA_COLOR")
             .env_remove("NO_COLOR")
             .env_remove("CLICOLOR_FORCE")
-            .env("GIT_CONFIG_NOSYSTEM", "1");
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", key)
+            .env("GIT_CONFIG_VALUE_0", value);
         cmd
     }
 

@@ -26,12 +26,12 @@ use anyhow::{anyhow, bail};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
-use super::{Ctx, absolute, check_label, print_json, rel_path, repositories};
+use super::{Ctx, absolute, check_label, print_json, rel_path, repositories, sync_options};
 use crate::Error;
 use crate::cli::{Format, ImportArgs};
 use crate::db;
 use crate::db::repos::{Changes, NewRepo, Selection};
-use crate::model::{Platform, Root, RunWhen, VcsKind, count};
+use crate::model::{Platform, Root, RunWhen, Strategy, VcsKind, count};
 use crate::transfer::{Registry, RepoRecord};
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
@@ -85,6 +85,7 @@ struct RepoPlan {
     /// The file's root name, lowercased; a key into `Plan::roots`.
     root: String,
     rel_path: String,
+    strategy: Strategy,
     action: RepoAction,
 }
 
@@ -310,6 +311,10 @@ fn plan(
             )
             .into());
         }
+        let strategy: Strategy = record
+            .strategy
+            .parse()
+            .map_err(|err| anyhow!("repository '{}': {err}", record.name))?;
         let mut hooks = Vec::new();
         for hook in &record.hooks {
             let parsed =
@@ -341,6 +346,7 @@ fn plan(
             record: record.clone(),
             root: root_key,
             rel_path: rel,
+            strategy,
             action,
         });
     }
@@ -407,6 +413,9 @@ fn apply(conn: &Connection, plan: &Plan) -> Result<(), Error> {
                 branch: record.branch.as_deref(),
                 clone_filter: record.clone_filter.as_deref(),
                 clone_depth: record.clone_depth,
+                allow_dirty: record.allow_dirty,
+                submodules: record.submodules,
+                strategy: repo.strategy,
                 tags: &record.tags,
             },
         )?;
@@ -488,6 +497,10 @@ fn show(ui: &crate::ui::Ui, plan: &Plan) {
                 }
                 if !record.enabled {
                     detail.push_str("  (disabled)");
+                }
+                let options = sync_options(record.allow_dirty, record.submodules, repo.strategy);
+                if options != [Strategy::FfOnly.as_str()] {
+                    detail.push_str(&format!("  sync: {}", options.join(", ")));
                 }
                 table.push(row("repo", &record.name, "add", THEME.new, detail));
                 for hook in hooks {
@@ -657,6 +670,9 @@ fn plan_json(plan: &Plan, dry_run: bool) -> Value {
                 "clone_filter": record.clone_filter,
                 "clone_depth": record.clone_depth,
                 "enabled": record.enabled,
+                "allow_dirty": record.allow_dirty,
+                "submodules": record.submodules,
+                "strategy": repo.strategy.as_str(),
                 "tags": record.tags,
                 "action": action,
                 "reason": reason,

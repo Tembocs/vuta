@@ -20,7 +20,7 @@ use crate::Error;
 use crate::cli::{Format, ScanArgs};
 use crate::db;
 use crate::db::repos::{NewRepo, Selection};
-use crate::model::{Root, VcsKind};
+use crate::model::{Root, Strategy, VcsKind};
 use crate::paths;
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
@@ -148,6 +148,9 @@ pub fn run(ctx: &mut Ctx, args: &ScanArgs) -> Result<ExitCode, Error> {
                             branch: None,
                             clone_filter: None,
                             clone_depth: None,
+                            allow_dirty: false,
+                            submodules: false,
+                            strategy: Strategy::FfOnly,
                             tags: &tags,
                         },
                     )?;

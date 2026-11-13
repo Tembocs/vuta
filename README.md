@@ -1,6 +1,6 @@
 # Vuta
 
-Vuta ("pull" in Swahili) is a command-line tool that keeps many source checkouts cloned and up to date. Updates are fast-forward only, repositories sync in parallel, and all state lives in one SQLite database.
+Vuta ("pull" in Swahili) is a command-line tool that keeps many source checkouts cloned and up to date. Updates are fast-forward only unless a repository opts into more, repositories sync in parallel, and all state lives in one SQLite database.
 
 > **Status:** early development. Every v1 command works (milestones M0 to M4); there is no release yet. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and milestones.
 
@@ -32,6 +32,9 @@ vuta log                                      # recent runs and what happened
 vuta list                                     # one line per repository
 vuta show zed                                 # everything about one repository
 vuta set zed --branch main                    # change the record
+vuta set dotfiles --allow-dirty               # fast-forward around local edits upstream does not touch
+vuta set mylib --strategy rebase              # replay local commits onto upstream
+vuta add https://github.com/example/app.git --submodules   # clone and update with submodules
 vuta tag zed +editor -rust                    # add and remove tags
 vuta remove zed --delete-files                # forget it, and delete the checkout after asking
 vuta config set sync.jobs 8                   # settings: sync.jobs, history.keep_runs, ui.glyphs
@@ -43,7 +46,15 @@ Global options: `--db <PATH>` (or `VUTA_DB`), `--color auto|always|never` (or `V
 
 The first `vuta add` or `vuta scan` with no root registered asks whether to use the current directory (or the directory being scanned) as the first root. Without a terminal it prints the `vuta root add` command instead. While `vuta sync` runs in a terminal, a live line per repository in progress shows what it is doing and for how long.
 
-Updates are fast-forward only. A checkout with local changes, local commits that diverge from upstream, a detached HEAD, no upstream branch or a different `origin` is skipped and left untouched. `vuta sync` exits 0 when everything succeeded, 1 when a repository or hook failed (or a repository was skipped, with `--strict`), 3 when it could not start, and 130 on Ctrl-C.
+Updates are fast-forward only. A checkout with local changes, local commits that diverge from upstream, a detached HEAD, no upstream branch or a different `origin` is skipped and left untouched. `vuta sync` exits 0 when everything succeeded, 1 when a repository, hook or submodule update failed (or a repository was skipped, with `--strict`), 3 when it could not start, and 130 on Ctrl-C.
+
+Three options per repository, all off by default, relax this where you ask for it. `vuta show` lists them, and `vuta export` carries them:
+
+- `vuta set <name> --allow-dirty` fast-forwards a checkout with local edits, as long as upstream changes none of the edited files. Otherwise it is skipped, naming the files both sides changed.
+- `vuta set <name> --strategy rebase` replays local commits onto upstream instead of skipping a diverged checkout. The tree must be clean. If the rebase stops, for example on a conflict, Vuta aborts it and reports a skip; the checkout is left as it was.
+- `vuta set <name> --submodules` (or `vuta add --submodules`) runs `git submodule update --init --recursive` after each clone and update. A failure shows on the result line and fails the run, but the repository's own update stands and the next sync tries again. A submodule holding a commit nothing else holds is never moved.
+
+`--no-allow-dirty`, `--strategy ff-only` and `--no-submodules` turn them off again.
 
 ### Moving to another machine
 

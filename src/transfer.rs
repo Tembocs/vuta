@@ -15,6 +15,7 @@
 //!     "name": "v", "root": "src", "path": "v/v",
 //!     "url": "https://github.com/vlang/v", "branch": null,
 //!     "clone_filter": null, "clone_depth": null, "enabled": true,
+//!     "allow_dirty": false, "submodules": false, "strategy": "ff-only",
 //!     "tags": ["v"],
 //!     "hooks": [{ "command": "make", "platform": "unix", "when": "changed", "enabled": true }]
 //!   }]
@@ -75,6 +76,15 @@ pub struct RepoRecord {
     pub clone_depth: Option<u32>,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Fields added after version 1 shipped default to the old behaviour,
+    /// so older files still read; an older Vuta ignores them.
+    #[serde(default)]
+    pub allow_dirty: bool,
+    #[serde(default)]
+    pub submodules: bool,
+    /// `ff-only` or `rebase`.
+    #[serde(default = "ff_only")]
+    pub strategy: String,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -96,6 +106,10 @@ pub struct HookRecord {
 
 fn yes() -> bool {
     true
+}
+
+fn ff_only() -> String {
+    "ff-only".to_owned()
 }
 
 fn any() -> String {
@@ -175,6 +189,8 @@ mod tests {
         let registry = Registry::parse(MINIMAL.as_bytes()).unwrap();
         let repo = &registry.repos[0];
         assert!(repo.enabled && repo.tags.is_empty() && repo.branch.is_none());
+        assert!(!repo.allow_dirty && !repo.submodules);
+        assert_eq!(repo.strategy, "ff-only");
         let hook = &repo.hooks[0];
         assert_eq!(
             (hook.platform.as_str(), hook.when.as_str()),

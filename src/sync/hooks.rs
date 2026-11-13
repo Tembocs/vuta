@@ -105,7 +105,7 @@ pub fn run(
 /// `VUTA_OLD_REV` (empty after a clone) and `VUTA_NEW_REV`.
 fn revisions(outcome: &Outcome) -> (&str, &str) {
     match outcome {
-        Outcome::Cloned { rev } => ("", rev),
+        Outcome::Cloned { rev, .. } => ("", rev),
         Outcome::Updated { old, new, .. } => (old, new),
         Outcome::UpToDate { rev, .. } => (rev, rev),
         Outcome::Skipped { .. } | Outcome::Failed { .. } => ("", ""),
@@ -136,6 +136,8 @@ mod tests {
             old: "aaa".into(),
             new: "bbb".into(),
             commits: 1,
+            rebased: 0,
+            submodules: None,
         }
     }
 
@@ -143,6 +145,7 @@ mod tests {
         Outcome::UpToDate {
             rev: "bbb".into(),
             ahead: 0,
+            submodules: None,
         }
     }
 
@@ -172,7 +175,7 @@ mod tests {
         let mut disabled = always.clone();
         disabled.enabled = false;
         let skipped = Outcome::Skipped {
-            reason: SkipReason::Dirty,
+            reason: SkipReason::Dirty { overlap: vec![] },
             behind: 1,
         };
         let failed = Outcome::Failed {
@@ -183,7 +186,10 @@ mod tests {
         assert!(should_run(&changed, &updated(), false));
         assert!(should_run(
             &changed,
-            &Outcome::Cloned { rev: "a".into() },
+            &Outcome::Cloned {
+                rev: "a".into(),
+                submodules: None,
+            },
             false
         ));
         assert!(!should_run(&changed, &up_to_date(), false));

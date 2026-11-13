@@ -17,10 +17,14 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, 
 use rusqlite::{Connection, ErrorCode};
 
 use crate::model::{
-    FailReason, GlyphMode, HookOutcome, OutcomeKind, Platform, RunWhen, SkipKind, VcsKind,
+    FailReason, GlyphMode, HookOutcome, OutcomeKind, Platform, RunWhen, SkipKind, Strategy,
+    SubmoduleOutcome, VcsKind,
 };
 
-const MIGRATIONS: &[&str] = &[include_str!("../../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../migrations/0001_init.sql"),
+    include_str!("../../migrations/0002_sync_options.sql"),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -201,7 +205,9 @@ sql_text_enum!(
     HookOutcome,
     Platform,
     RunWhen,
-    GlyphMode
+    GlyphMode,
+    Strategy,
+    SubmoduleOutcome
 );
 
 #[cfg(test)]
@@ -283,6 +289,46 @@ pub(crate) mod tests {
         })
         .unwrap();
         assert_eq!(count_roots(&conn), 2);
+    }
+
+    #[test]
+    fn upgrades_a_version_1_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vuta.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute_batch(
+                "INSERT INTO roots (name, path) VALUES ('src', '/src');
+                 INSERT INTO repos (name, root_id, rel_path, url) VALUES ('zed', 1, 'zed', 'u');
+                 INSERT INTO runs (vuta_version, args) VALUES ('0.1.0', 'sync');
+                 INSERT INTO run_results (run_id, repo_id, outcome, duration_ms)
+                     VALUES (1, 1, 'up_to_date', 5);",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), known_version());
+        let options: (bool, bool, Strategy) = conn
+            .query_row(
+                "SELECT allow_dirty, submodules, strategy FROM repos",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(options, (false, false, Strategy::FfOnly));
+        let result: (Option<u32>, Option<SubmoduleOutcome>) = conn
+            .query_row("SELECT rebased, submodules FROM run_results", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(result, (None, None));
+        assert!(
+            conn.execute("UPDATE repos SET strategy = 'merge'", [])
+                .is_err(),
+            "the CHECK constraint refuses other strategies"
+        );
     }
 
     #[test]

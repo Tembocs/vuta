@@ -20,7 +20,7 @@ use crate::Error;
 use crate::cli::{Format, SyncArgs};
 use crate::db;
 use crate::db::repos::Selection;
-use crate::model::{HookOutcome, Outcome, RepoEntry, Tally};
+use crate::model::{HookOutcome, Outcome, RepoEntry, Submodules, Tally};
 use crate::paths;
 use crate::sync::hooks::{self, HookContext, HookEvent};
 use crate::sync::{self, Event, Job};
@@ -281,6 +281,9 @@ pub fn execute(ui: &Ui, conn: &Connection, plan: Plan) -> Result<ExitCode, Error
             duration,
         } => {
             tally.add(outcome.kind());
+            if matches!(outcome.submodules(), Some(Submodules::Failed { .. })) {
+                tally.submodules_failed += 1;
+            }
             if text {
                 let line = ResultLine {
                     index: tally.total() as usize,

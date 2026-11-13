@@ -96,7 +96,9 @@ pub fn run(ctx: &mut Ctx, args: &LogArgs) -> Result<ExitCode, Error> {
         let notable: Vec<_> = db::runs::results_for_run(&conn, run.id)?
             .into_iter()
             .filter(|r| {
-                r.outcome != OutcomeKind::UpToDate || r.hook_outcome == Some(HookOutcome::Failed)
+                r.outcome != OutcomeKind::UpToDate
+                    || r.hook_outcome == Some(HookOutcome::Failed)
+                    || r.submodules.is_some()
             })
             .collect();
         let name_width = notable

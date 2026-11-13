@@ -161,7 +161,9 @@ fn inspect(vcs: &dyn Vcs, repo: &Repo, path: &Path) -> Inspection {
         Ok(Head::Unborn) => return Inspection::only(State::Unborn),
         Err(err) => return error(err),
     };
-    let dirty = match vcs.is_dirty(path) {
+    // As in a sync: with submodules turned on, a submodule at another
+    // commit is not a local change.
+    let dirty = match vcs.is_dirty(path, repo.submodules) {
         Ok(dirty) => dirty,
         Err(err) => return error(err),
     };

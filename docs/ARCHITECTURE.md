@@ -17,7 +17,7 @@ Vuta ("pull" in Swahili) is a single-binary Rust CLI that keeps a set of source 
 ### Goals
 
 - **Works from any directory.** Checkout locations come from the database, never from the current directory.
-- **Never damages a checkout.** Updates are fast-forward only. Vuta never merges, rebases, stashes or resets.
+- **Never damages a checkout.** Updates are fast-forward only unless a repository opts into more (section 7). Vuta never merges, stashes or resets. It rebases only a clean checkout whose repository asks for it, and aborts a rebase that stops. Whatever git refuses or stops part-way leaves the checkout as it was.
 - **One command syncs everything.** Repositories sync in parallel, each gets one coloured result line, and the exit code says whether anything failed.
 - **All state in one file.** The registry, tags, hooks, settings and run history live in SQLite.
 - **Another VCS is a new backend, not a redesign.** Everything Git-specific sits behind one trait.
@@ -27,7 +27,6 @@ Vuta ("pull" in Swahili) is a single-binary Rust CLI that keeps a set of source 
 - Mercurial, Subversion and other VCS backends.
 - Config files. (`vuta export` and `vuta import` move the registry between machines, but the database stays the source of truth.)
 - Anything that writes to a remote: commit, push, tag.
-- Submodule management.
 
 Section 13 says where each of these plugs in later.
 
@@ -49,7 +48,8 @@ vuta/
 ├── .gitignore                 /target
 ├── .github/workflows/ci.yml
 ├── migrations/
-│   └── 0001_init.sql          the schema in section 4
+│   ├── 0001_init.sql          the schema in section 4
+│   └── 0002_sync_options.sql  per-repository sync options (section 4)
 ├── src/
 │   ├── main.rs                parse args, set colour, open DB, dispatch, map errors to exit codes
 │   ├── lib.rs                 module declarations
@@ -87,7 +87,8 @@ vuta/
     ├── cli.rs                 global flags, db path, doctor, exit codes
     ├── registry.rs
     ├── sync.rs
-    └── hooks.rs
+    ├── hooks.rs
+    └── options.rs             allow-dirty, the rebase strategy, submodules
 xtask/                         cargo xtask deb | msix (docs/PACKAGING.md)
 ├── Cargo.toml                 clap and anyhow only
 └── src/
@@ -311,16 +312,32 @@ CREATE TABLE settings (
 ) STRICT, WITHOUT ROWID;
 ```
 
+### Per-repository sync options (`migrations/0002_sync_options.sql`)
+
+```sql
+ALTER TABLE repos ADD COLUMN allow_dirty INTEGER NOT NULL DEFAULT 0
+    CHECK (allow_dirty IN (0, 1));
+ALTER TABLE repos ADD COLUMN submodules INTEGER NOT NULL DEFAULT 0
+    CHECK (submodules IN (0, 1));
+ALTER TABLE repos ADD COLUMN strategy TEXT NOT NULL DEFAULT 'ff-only'
+    CHECK (strategy IN ('ff-only', 'rebase'));
+ALTER TABLE run_results ADD COLUMN rebased INTEGER;
+ALTER TABLE run_results ADD COLUMN submodules TEXT
+    CHECK (submodules IN ('ok', 'failed'));
+```
+
+Every option defaults to the v1 behaviour, so a database upgraded from schema 1 syncs exactly as before. `run_results.rebased` counts the local commits an update replayed (NULL when none were). `run_results.submodules` is NULL when the submodule step did not run; when it failed, the repository's own outcome stands and git's output goes in `message`.
+
 ### What each table is for
 
 | Table | Holds | Notes |
 | --- | --- | --- |
 | `roots` | Named base directories | At most one row is the default. |
-| `repos` | One row per managed checkout | Location is `roots.path` joined with `rel_path`. `last_*` columns cache the latest result so `vuta list` needs no join. |
+| `repos` | One row per managed checkout | Location is `roots.path` joined with `rel_path`. `last_*` columns cache the latest result so `vuta list` needs no join. `allow_dirty`, `submodules` and `strategy` are the sync options of section 7. |
 | `repo_tags` | Free-form labels | Group repositories, for example by language. Drives `vuta sync --tag rust`. |
 | `hooks` | Commands to run after a sync | Ordered by `position` within a repository. |
 | `runs` | One row per `vuta sync`, and per `vuta add` that clones | `finished_at` stays NULL if the process was killed. `args` is the command line without the program name. |
-| `run_results` | One row per repository per run | Feeds `vuta log` and `vuta show`. `hook_outcome` stays NULL for a repository with no hooks; it is `not_run` when hooks exist but none ran (`--no-hooks`, nothing eligible, or Ctrl-C). |
+| `run_results` | One row per repository per run | Feeds `vuta log` and `vuta show`. `hook_outcome` stays NULL for a repository with no hooks; it is `not_run` when hooks exist but none ran (`--no-hooks`, nothing eligible, or Ctrl-C). `submodules` works the same way for the submodule step. |
 | `settings` | Key-value preferences | `sync.jobs` (default 4), `history.keep_runs` (default 200), `ui.glyphs` (`auto`, `unicode`, `ascii`). |
 
 ### Conventions
@@ -352,33 +369,40 @@ pub struct Repo {
     pub clone_filter: Option<String>,
     pub clone_depth: Option<u32>,
     pub enabled: bool,
+    pub allow_dirty: bool,         // fast-forward around untouched local changes
+    pub submodules: bool,          // update submodules after a clone or update
+    pub strategy: Strategy,        // FfOnly (the default) or Rebase
 }
 
 pub enum VcsKind { Git }
 
 pub enum Outcome {
-    Cloned     { rev: String },
-    Updated    { old: String, new: String, commits: u32 },
-    UpToDate   { rev: String, ahead: u32 },
+    Cloned     { rev: String, submodules: Option<Submodules> },
+    Updated    { old: String, new: String, commits: u32, rebased: u32,
+                 submodules: Option<Submodules> },
+    UpToDate   { rev: String, ahead: u32, submodules: Option<Submodules> },
     Skipped    { reason: SkipReason, behind: u32 },
     Failed     { reason: FailReason, message: String },
 }
 
+pub enum Submodules { Ok, Failed { message: String } }   // None: the step did not run
+
 pub enum SkipReason {
-    Dirty,
+    Dirty          { overlap: Vec<String> },  // overlap: only with allow_dirty
     Diverged       { ahead: u32 },
     Detached       { rev: String },
     NoUpstream     { branch: String },
     RemoteMismatch { found: String, expected: String },
     Disabled,
     FetchOnly,     // --fetch-only fetched but left the tree alone
+    RebaseStopped  { ahead: u32, why: String },  // aborted; the checkout is as it was
 }
-pub enum FailReason { NotACheckout, Clone, Fetch, FastForward, Interrupted }
+pub enum FailReason { NotACheckout, Clone, Fetch, FastForward, Rebase, Interrupted }
 ```
 
-`Outcome` is the one value a worker returns per repository. The database row, the coloured result line and the exit code are all derived from it. Skip reasons carry what their result line needs (section 7); `SkipReason::describe` gives the plain text stored in `run_results.message`.
+`Outcome` is the one value a worker returns per repository. The database row, the coloured result line and the exit code are all derived from it. Skip reasons carry what their result line needs (section 7); `SkipReason::describe` gives the plain text stored in `run_results.message`. The submodule step's result rides on the outcome it follows instead of replacing it, the way a hook's does.
 
-`model.rs` also holds the row types the other layers exchange: `Hook`, `Run`, `RunResult`, `RepoEntry` (a repository with its root name, tags and cached last result), and `Tally` (outcome counts for the summary line and `vuta log`). Every enum stored as text (`OutcomeKind`, `SkipKind`, `FailReason`, `HookOutcome`, `Platform`, `RunWhen`, `GlyphMode`) parses case-insensitively from the same strings the schema's CHECK constraints allow.
+`model.rs` also holds the row types the other layers exchange: `Hook`, `Run`, `RunResult`, `RepoEntry` (a repository with its root name, tags and cached last result), and `Tally` (outcome counts, failed hooks and failed submodule steps, for the summary line and `vuta log`). Every enum stored as text (`OutcomeKind`, `SkipKind`, `FailReason`, `HookOutcome`, `SubmoduleOutcome`, `Strategy`, `Platform`, `RunWhen`, `GlyphMode`) parses case-insensitively from the same strings the schema's CHECK constraints allow.
 
 ### The trait (`vcs/mod.rs`)
 
@@ -398,22 +422,34 @@ pub enum Head {
 
 pub struct Divergence { pub ahead: u32, pub behind: u32 }
 
+pub enum Rebase { Done, Stopped { why: String } }   // Stopped: aborted, nothing changed
+
+pub enum SubmoduleStatus { Current, Uninitialized, Moved, Conflict }
+pub struct Submodule { pub path: String, pub rev: String, pub status: SubmoduleStatus }
+
 pub trait Vcs: Send + Sync {
     fn is_checkout(&self, path: &Path) -> bool;
     fn remote_url(&self, path: &Path) -> anyhow::Result<Option<String>>;
     fn head(&self, path: &Path) -> anyhow::Result<Head>;
-    fn is_dirty(&self, path: &Path) -> anyhow::Result<bool>;
+    fn is_dirty(&self, path: &Path, ignore_submodules: bool) -> anyhow::Result<bool>;
+    fn local_changes(&self, path: &Path, ignore_submodules: bool) -> anyhow::Result<Vec<String>>;
+    fn incoming_changes(&self, path: &Path) -> anyhow::Result<Vec<String>>;
     fn clone_into(&self, spec: &CloneSpec, dest: &Path) -> anyhow::Result<()>;
     fn fetch(&self, path: &Path) -> anyhow::Result<()>;
     /// `None` when the current branch has no upstream.
     fn divergence(&self, path: &Path) -> anyhow::Result<Option<Divergence>>;
     fn fast_forward(&self, path: &Path) -> anyhow::Result<()>;
+    /// Never leaves a rebase in progress; an error means the abort failed too.
+    fn rebase(&self, path: &Path) -> anyhow::Result<Rebase>;
+    fn submodules(&self, path: &Path) -> anyhow::Result<Vec<Submodule>>;
+    fn head_is_referenced(&self, path: &Path) -> anyhow::Result<bool>;
+    fn update_submodules(&self, path: &Path) -> anyhow::Result<()>;
 }
 ```
 
 `vcs::backend(kind, tracer)` returns the implementation for a `VcsKind`. The optional tracer sees every command and its output, which is how `--verbose` reaches `ui` without the backend printing anything.
 
-The methods are small questions and single actions. All policy (what to do when dirty, diverged or detached) lives in `sync/worker.rs`, so a second backend inherits the same safety rules.
+The methods are small questions and single actions. All policy (what to do when dirty, diverged or detached, whether local changes overlap upstream, whether a submodule may move) lives in `sync/worker.rs`, so a second backend inherits the same safety rules. The one exception is `rebase`, whose abort belongs to the action itself: no caller ever sees a rebase left in progress.
 
 ### Git backend (`vcs/git.rs`)
 
@@ -422,16 +458,25 @@ The methods are small questions and single actions. All policy (what to do when 
 | `is_checkout` | `git -C <p> rev-parse --show-toplevel`, and the result must equal `<p>` |
 | `remote_url` | `git -C <p> remote get-url origin` |
 | `head` | `git -C <p> symbolic-ref --quiet --short HEAD` (exit 1 means detached), then `git -C <p> rev-parse HEAD` |
-| `is_dirty` | `git -C <p> status --porcelain --untracked-files=no` prints anything |
+| `is_dirty` | `git -C <p> status --porcelain --untracked-files=no [--ignore-submodules=all]` prints anything |
+| `local_changes` | `git -C <p> status --porcelain -z --untracked-files=no --no-renames [--ignore-submodules=all]`, staged and unstaged paths |
+| `incoming_changes` | `git -C <p> diff --name-only --no-renames -z HEAD @{upstream}` |
 | `clone_into` | `git clone --origin origin [--branch B] [--filter F] [--depth N] <url> <dest>` |
-| `fetch` | `git -C <p> fetch --prune origin` |
+| `fetch` | `git -C <p> fetch --prune --no-recurse-submodules origin` |
 | `divergence` | `git -C <p> rev-list --left-right --count HEAD...@{upstream}` prints `ahead<TAB>behind` |
-| `fast_forward` | `git -C <p> merge --ff-only @{upstream}` |
+| `fast_forward` | `git -C <p> -c merge.autoStash=false merge --ff-only @{upstream}` |
+| `rebase` | `git -C <p> -c rebase.autoStash=false -c rebase.autoSquash=false -c rebase.updateRefs=false rebase @{upstream}`; if it fails with `rebase-merge` or `rebase-apply` present, `git rebase --abort` |
+| `submodules` | `git -C <p> submodule status --recursive`: ` `, `-`, `+` or `U`, the commit, the path |
+| `head_is_referenced` | `git -C <p> symbolic-ref --quiet HEAD` succeeds, or `git for-each-ref --count=1 --contains HEAD` prints a ref |
+| `update_submodules` | `git -C <p> submodule update --init --recursive --checkout` |
 
 This sequence was run against a local repository with Git 2.43 on 12 Nov 2026. Each command behaved as the table says, including the diverged, detached and no-upstream cases.
 
 - **`is_checkout` compares the top level** because a plain folder inside another repository also answers "yes" to simpler checks.
 - **Untracked files do not count as dirty.** Build outputs such as V's compiled binary would otherwise block every update.
+- **Nothing stashes.** `merge.autoStash` and `rebase.autoStash` are forced off for the one command, so a user's config can never make Vuta stash local changes and pop them back with conflicts. `rebase.autoSquash` and `rebase.updateRefs` are off too, so a rebase only replays the branch's own commits and moves no other branch. Settings git does not know are ignored, so older versions accept them.
+- **Fetch leaves submodules alone.** Git's default `fetch.recurseSubmodules=on-demand` would fail the whole fetch when a submodule's remote is unreachable. The submodule step fetches what submodules need.
+- **Submodules check out, nothing else.** `--checkout` overrides an `update = merge` or `rebase` mode from `.gitmodules`, which could stop part-way inside a submodule.
 - **Clones land in `<dest>.vuta-partial`** and are renamed on success. An interrupted clone never leaves a half-made checkout at the real path. Stale partial directories are removed before a new clone.
 
 ### Process environment (`proc.rs`)
@@ -483,7 +528,7 @@ The command is `vuta <subcommand>`. Eighteen subcommands cover the registry, syn
 | `vuta list` (alias `ls`) | One line per repository |
 | `vuta status [name]...` | Local state of each checkout, without touching the network |
 | `vuta show <name>` | Everything about one repository: location, tags, hooks, recent results |
-| `vuta set <name> [options]` | Change name, URL, branch, path or enabled state |
+| `vuta set <name> [options]` | Change name, URL, branch, path, enabled state, or how it syncs |
 | `vuta tag <name> <+tag\|-tag>...` | Add or remove tags, for example `vuta tag zed +rust -editor` |
 | `vuta remove <name>` (alias `rm`) | Forget a repository. `--delete-files` also deletes the checkout after a confirmation. |
 | `vuta hook add\|list\|remove` | Manage post-sync commands (section 8) |
@@ -499,13 +544,14 @@ The command is `vuta <subcommand>`. Eighteen subcommands cover the registry, syn
 
 ```text
 vuta add <url> [path] [--name N] [--root R] [--tag T]... [--branch B]
-                      [--filter F] [--depth N] [--no-clone]
+                      [--filter F] [--depth N] [--submodules] [--no-clone]
 ```
 
 - `path` is relative to the root and defaults to the inferred name. `vuta add https://github.com/zed-industries/zed.git rust/zed --tag rust` places Zed under `rust/zed` in the default root.
 - `--filter blob:none` makes a partial clone, which suits large repositories you only build, such as Zed or Modular.
 - Without `--no-clone`, the clone is an ordinary one-repository run: it takes the sync lock before registering, prints one result line, is recorded in `runs`, and sets the exit code like `vuta sync`. A failed clone leaves the repository registered for the next sync.
 - `--no-clone` only records the repository. The next `vuta sync` clones it.
+- `--submodules` turns on the submodule step (section 7), so the clone comes with its submodules. It is the only sync option `add` takes, because it is the only one that matters to a fresh clone; `vuta set` sets the others.
 - **First use.** With no roots registered and no `--root`, a person at a terminal is asked whether the current directory should become the first root, named after the directory (`src` when that name is not valid). Yes registers it as the default and the add goes on; no, or no terminal on stdin and stderr, exits 3 with the command that adds it, such as `vuta root add code /home/me/code`. Scripts never see a question. The question comes after the arguments are checked, so a typo creates no root.
 - A remote given as a local path that exists, such as `../mirror/zed.git`, is stored as an absolute path, so the repository syncs from any directory. Other remotes are stored as typed.
 - The name must not clash with another repository's, compared case-insensitively. Names, root names and tags must not be empty, contain whitespace or start with `+` or `-`.
@@ -518,8 +564,8 @@ vuta add <url> [path] [--name N] [--root R] [--tag T]... [--branch B]
 | `vuta root list` | Name, repository count, path (marked `(missing)` when it does not exist) and which root is the default. |
 | `vuta root remove <name>` | Refused while repositories use the root. Removing the default root leaves no default, with a warning. |
 | `vuta list [--tag T]... [--root R]` | Includes disabled repositories, dimmed and marked `(disabled)`. A ROOT column appears when more than one root is registered. |
-| `vuta show <name>` | Root, path, URL, branch, clone options, enabled state, tags, the latest result, hooks, the last ten results, and the full git output of the newest failure. |
-| `vuta set <name> ...` | `--name`, `--url`, `--branch` or `--default-branch`, `--path`, `--root`, `--filter` or `--no-filter`, `--depth` or `--no-depth`, `--enable` or `--disable`. At least one is required. Only the record changes: if the location changes, Vuta warns that no files were moved. |
+| `vuta show <name>` | Root, path, URL, branch, clone options, sync options (as `sync  rebase, allow-dirty, submodules`), enabled state, tags, the latest result, hooks, the last ten results, and the full git output of the newest failure, of the repository or of its submodules. |
+| `vuta set <name> ...` | `--name`, `--url`, `--branch` or `--default-branch`, `--path`, `--root`, `--filter` or `--no-filter`, `--depth` or `--no-depth`, `--enable` or `--disable`, and the sync options: `--allow-dirty` or `--no-allow-dirty`, `--submodules` or `--no-submodules`, `--strategy ff-only\|rebase`. At least one is required. Only the record changes: if the location changes, Vuta warns that no files were moved. |
 | `vuta tag <name> [+tag\|-tag\|tag]...` | A bare tag is added. Removals apply before additions. With no tags it prints the repository's tags. |
 | `vuta remove <name> [--delete-files [-y]]` | Without `--delete-files` the checkout stays on disk. With it, Vuta deletes the path only if it is a Git checkout, after a `[y/N]` question on stderr (answered on stdin) that mentions local changes. Any answer but `y` or `yes` cancels everything and exits 1. `-y` skips the question. |
 
@@ -559,7 +605,8 @@ vuta import <FILE|-> [--map-root NAME=PATH]... [--no-hooks] [--dry-run]
 
 They set up a second machine from the first: the same repositories, tags and hooks, under roots that may live elsewhere.
 
-- **The file** is JSON with `"format": "vuta-registry"` and `"version": 1` (`src/transfer.rs` documents it). It holds roots with their paths and default flag, repositories with root, relative path, URL, branch, clone options, enabled state, tags and hooks, and settings that differ from their defaults. Run history and cached revisions stay behind, since they describe one machine.
+- **The file** is JSON with `"format": "vuta-registry"` and `"version": 1` (`src/transfer.rs` documents it). It holds roots with their paths and default flag, repositories with root, relative path, URL, branch, clone options, enabled state, sync options (`allow_dirty`, `submodules`, `strategy`), tags and hooks, and settings that differ from their defaults. Run history and cached revisions stay behind, since they describe one machine.
+- **Sync options** were added to version 1 files with defaults (`false`, `false`, `"ff-only"`), so older files still import. An older Vuta ignores them and syncs fast-forward only. An unknown strategy is refused when the file is validated, and the plan lists a repository's options when any is not the default.
 - **Writing.** `-o FILE` writes UTF-8 directly. Prefer it on Windows, where PowerShell 5.1's `>` writes UTF-16; `import` reads UTF-16 and UTF-8 with or without a byte-order mark anyway.
 - **Roots** are resolved in order: `--map-root NAME=PATH` puts the file's root NAME at PATH (joining a local root that already has that path, else creating NAME there); without a mapping, a local root of the same name, then one with the same path, is used; otherwise the root is created at its exported path, which must be absolute here. A Windows path is not absolute on Linux, and the error names the `--map-root` to add.
 - **Only adds.** A repository whose name is registered already is skipped (the line says when its URL differs), as is one whose location is taken. A setting is applied only where the local value is still the default. A default root is set only if there is none. Nothing is cloned: `vuta sync` does that next.
@@ -619,7 +666,7 @@ Scan infers names from URLs, so Modular's repository registers as `modular`. `vu
 
 ## 7. Sync engine
 
-A sync run fetches every selected repository in parallel and changes a working tree only when a clean fast-forward is possible.
+A sync run fetches every selected repository in parallel and changes a working tree only when a clean fast-forward is possible, unless the repository's options (below) allow a little more.
 
 ### Phases of a run
 
@@ -636,7 +683,7 @@ A sync run fetches every selected repository in parallel and changes a working t
 
 &#91;embedded content: per-repository sync · 7 checks, 2 actions, 9 outcomes\]
 
-Checks run top to bottom and the first one that fails decides the outcome. Green outcomes exit 0, amber ones are skips, red ones are failures. A clone or fast-forward that git rejects becomes `failed` with reason `clone` or `fast_forward`.
+Checks run top to bottom and the first one that fails decides the outcome. Green outcomes exit 0, amber ones are skips, red ones are failures. A clone or fast-forward that git rejects becomes `failed` with reason `clone` or `fast_forward`. The diagram shows the defaults; the per-repository options below change checks 5, 6 and 7, and add a step after a clone or update.
 
 | Result | Reason | What the line says |
 | --- | --- | --- |
@@ -645,11 +692,36 @@ Checks run top to bottom and the first one that fails decides the outcome. Green
 | skipped | `no_upstream` | branch `<name>` tracks no remote branch |
 | skipped | `diverged` | 2 local commits, 5 behind |
 | skipped | `dirty` | local changes; 3 commits behind |
+| skipped | `dirty` | local changes overlap upstream in `file.txt`; 3 commits behind (with `allow_dirty`) |
+| skipped | `rebase_stopped` | rebase stopped (conflict in `file.txt`) and was undone; 1 local commit, 3 behind |
 | skipped | `fetch_only` | 3 commits behind (only with `--fetch-only`) |
 | failed | `not_a_checkout` | path exists but is not a Git checkout |
 | failed | `clone`, `fetch`, `fast_forward` | the last line of git's error output |
+| failed | `rebase` | the abort of a stopped rebase failed too; the line says how to finish it by hand |
 
 A checkout that is ahead of its upstream and not behind counts as up to date, with "2 local commits" noted on the line.
+
+### Per-repository options
+
+Three options, all off by default, are set with `vuta set` and stored in `repos` (section 4). With all three off, a sync behaves exactly as described above.
+
+| Option | Set with | Changes |
+| --- | --- | --- |
+| Fast-forward around local changes | `--allow-dirty` | Check 7: a checkout with modified tracked files is fast-forwarded when none of them is a file upstream changes. |
+| Strategy | `--strategy ff-only\|rebase` | Check 6: with `rebase`, a diverged checkout replays its local commits onto upstream instead of being skipped. |
+| Submodules | `--submodules` (also on `vuta add`) | After a clone or update, `git submodule update --init --recursive --checkout`. On an up-to-date checkout too, when a submodule is missing or not at its recorded commit. |
+
+**Fast-forward around local changes.** Vuta first compares the paths `git status` reports as changed (staged or not) with the paths `git diff HEAD @{upstream}` changes. Any overlap is a `dirty` skip that names the file, or the number of files, and nothing is run. Otherwise `git merge --ff-only` updates the tree. Git also refuses, changing nothing, when local changes would be overwritten, so a case the comparison misses fails as `fast_forward` with git's reason rather than touching a file. The local edits stay as they were, staged or not.
+
+**Rebase.** A rebase needs a clean tree: a diverged checkout with local changes is skipped as `dirty` even with `allow_dirty`, which covers fast-forwards only. When git stops part-way (a conflict, an untracked file in the way, a hook that refuses), the backend runs `git rebase --abort`. The worker then checks that HEAD is back on the same branch at the same commit and reports a `rebase_stopped` skip, with git's reason, such as the conflicting file. If the abort fails, or HEAD is not back, the result is a `rebase` failure whose message names the command that finishes the job; it is never mistaken for an interruption. A successful rebase is `updated`, with "rebased 2 local commits" on the line and in `run_results.rebased`. This weakens "Vuta never rebases" only for repositories that ask for it.
+
+**Submodules.**
+
+- **Reporting.** The step's result is a note on the outcome it follows, as a failed hook is. A failure keeps `cloned`, `updated` or `up to date`, adds "submodules failed: <git's last line>" to the line, stores `run_results.submodules = 'failed'` with git's output in `message`, counts in the summary as "1 submodule update failed" and makes the run exit 1. Hooks still run, since the repository itself changed. Success adds "submodules ok".
+- **Healing.** An up-to-date checkout whose submodules are missing or moved (a failed step earlier, or the option just turned on) runs the step again. One whose submodules are in place runs nothing.
+- **No lost commits.** `git submodule update` moves a submodule's HEAD to the recorded commit, which would orphan a commit made on a detached HEAD inside it. Before the step, every submodule that is not where its parent recorded it, and was not there before the update, must have its HEAD on a branch or held by a branch, tag or remote-tracking branch. Otherwise the step does not run and the failure names the submodule. A submodule with local changes is left to git, which refuses to overwrite them.
+- **Not dirty.** With the option on, a submodule at another commit than recorded is not a local change of the superproject. Otherwise one failed step would leave the checkout skipped as `dirty` from then on.
+- **Not under `--fetch-only`.** A clone made under `--fetch-only` still gets its submodules, since that changes no existing tree, but an up-to-date checkout is not healed.
 
 ### Concurrency
 
@@ -885,7 +957,7 @@ zed        rust   rust/zed     8be04d7   2 hours ago
 
 | Command | stdout |
 | --- | --- |
-| `list` | An array of repositories: `name`, `root`, `rel_path`, `path` (absolute), `vcs`, `url`, `branch`, `clone_filter`, `clone_depth`, `enabled`, `tags`, `last_rev`, `last_outcome`, `last_synced_at` |
+| `list` | An array of repositories: `name`, `root`, `rel_path`, `path` (absolute), `vcs`, `url`, `branch`, `clone_filter`, `clone_depth`, `enabled`, `allow_dirty`, `submodules`, `strategy` (`ff-only` or `rebase`), `tags`, `last_rev`, `last_outcome`, `last_synced_at` |
 | `status` | An array: `name`, `enabled`, `path`, `state` (`not_cloned`, `not_a_checkout`, `no_origin`, `remote_mismatch`, `unborn`, `detached`, `branch` or `error`), `branch`, `rev`, `dirty`, `ahead`, `behind`, `has_upstream`, `origin` (the URL found, for `remote_mismatch`) and `message` (for `error`) |
 | `log` | An array of runs, newest first: `id`, `started_at`, `finished_at`, `exit_code`, `args`, `vuta_version`, `tally` and every `results` entry |
 | `log <name>` | An array of that repository's results, newest first |
@@ -896,9 +968,9 @@ zed        rust   rust/zed     8be04d7   2 hours ago
 | `hook list [repo]` | An array: `id`, `repo`, `command`, `platform` (`any`, `unix` or `windows`), `when` (`changed` or `always`), `enabled` |
 | `config list` | An array: `key`, `value`, `default`, `is_default`, `description` |
 | `scan` | An object: `dir`, `dry_run`, `added` (each `name`, `root`, `rel_path`, `path`, `url`, `tags`; with `--dry-run`, what would be added), `already_registered` (a count) and `skipped` (each `path` and `reason`) |
-| `import` | An object: `dry_run`, `roots` (each `name`, `path`, `action` (`use` or `create`), `becomes_default`), `repos` (each `name`, `root`, `rel_path`, `url`, `branch`, `clone_filter`, `clone_depth`, `enabled`, `tags`, `action` (`add` or `skip`), `reason` (for a skip) and `hooks`, each `command`, `platform`, `when`), `settings` (each `key`, `value`, `action` (`set`, `keep` or `skip`), `local_value` (for `keep`)) and `disabled_hooks`, how many disabled hooks were left out. The plan is the same with and without `--dry-run`. |
+| `import` | An object: `dry_run`, `roots` (each `name`, `path`, `action` (`use` or `create`), `becomes_default`), `repos` (each `name`, `root`, `rel_path`, `url`, `branch`, `clone_filter`, `clone_depth`, `enabled`, `allow_dirty`, `submodules`, `strategy`, `tags`, `action` (`add` or `skip`), `reason` (for a skip) and `hooks`, each `command`, `platform`, `when`), `settings` (each `key`, `value`, `action` (`set`, `keep` or `skip`), `local_value` (for `keep`)) and `disabled_hooks`, how many disabled hooks were left out. The plan is the same with and without `--dry-run`. |
 
-A result is `run_id`, `repo`, `outcome`, `reason`, `old_rev`, `new_rev`, `commits`, `duration_ms`, `hook_outcome` and `message`, exactly as stored in `run_results`. `sync` reads its results back from the database after recording them, so it and `log` cannot disagree. A tally is `cloned`, `updated`, `up_to_date`, `skipped`, `failed` and `hooks_failed`.
+A result is `run_id`, `repo`, `outcome`, `reason`, `old_rev`, `new_rev`, `commits`, `duration_ms`, `hook_outcome`, `rebased`, `submodules` (`ok`, `failed`, or `null` when the step did not run) and `message`, exactly as stored in `run_results`. `sync` reads its results back from the database after recording them, so it and `log` cannot disagree. A tally is `cloned`, `updated`, `up_to_date`, `skipped`, `failed`, `hooks_failed` and `submodules_failed`.
 
 ```sh
 vuta sync --format json | jq -r '.results[] | select(.outcome == "failed") | .repo'
@@ -919,7 +991,7 @@ The exit code tells a script or scheduled task what happened without parsing out
 | Code | Meaning |
 | --- | --- |
 | 0 | Everything requested succeeded. Skipped repositories are allowed unless `--strict` is set. |
-| 1 | At least one repository or hook failed |
+| 1 | At least one repository, hook or submodule step failed |
 | 2 | Usage error: unknown flag, missing argument. This is clap's own code. |
 | 3 | Vuta could not start the work: `git` not found, database unreadable or newer than the binary, unknown repository, root or hook, an invalid name, path or setting, another sync or clone holds the lock |
 | 130 | Interrupted with Ctrl-C |
@@ -965,7 +1037,7 @@ Tests never touch the network: every "remote" is a bare Git repository in a temp
 | `commands/completions.rs` | Every shell's script calls back into `vuta`, and `--db` is read from the line being completed |
 | `vcs/remote.rs` | Name inference and URL comparison across `https://`, `ssh://` and `git@host:path` forms |
 | `paths.rs` | Joining a root with `rel_path`, `/` to `\` conversion, rejecting `..` and absolute `rel_path` values |
-| `db` | Migrations apply to an in-memory database, a second `open` changes nothing, and a too-new `user_version` is refused |
+| `db` | Migrations apply to an in-memory database, a second `open` changes nothing, a schema 1 database upgrades with every option off, and a too-new `user_version` is refused |
 | `ui/table.rs` | Column widths are identical with colour on and off |
 | `transfer.rs` | Defaults for missing fields, a round trip, UTF-8 with a BOM and UTF-16, and refusing other formats or newer versions |
 | `db` (`atomic`) | Nested units commit together, and a failing unit rolls back only its own writes |
@@ -993,8 +1065,16 @@ Tests never touch the network: every "remote" is a bare Git repository in a temp
 | `--color never` and `--color always` | No escape bytes, and escape bytes, in the same output |
 | Unknown repository name | Exit 3 with a one-line error |
 | Ctrl-C during a hook (Unix only, sent with `kill -INT`) | Exit 130; no further hook runs; the run row is closed with 130 |
+| `allow_dirty`, local edit to a file upstream does not change | Updated; the edit is still there, unstaged |
+| `allow_dirty`, local edit to a file upstream changes | Skipped as `dirty`, naming the file; working tree untouched |
+| `rebase`, local commit and upstream commit | Updated, with 1 local commit rebased on top of upstream |
+| `rebase`, local commit conflicting with upstream | Skipped as `rebase_stopped`; HEAD, branch, files and untracked files as before; no rebase in progress |
+| `rebase` with local changes | Skipped as `dirty`, even with `allow_dirty` |
+| `submodules`, clone and later update | Cloned and updated with "submodules ok"; the submodule follows its recorded commit |
+| `submodules`, submodule upstream unreachable | Outcome kept, "submodules failed", exit 1, hooks still run; the next sync heals it once the upstream is back |
+| `submodules`, commit on a submodule's detached HEAD | The step is refused and the commit stays checked out |
 
-The scenarios live in `tests/sync.rs` and `tests/hooks.rs`. `tests/registry.rs` covers the registry commands, `scan`, `status`, the first-root error without a terminal, and the JSON of every command that has it. `tests/cli.rs` runs completion requests the way fish sends them, against a real registry and against a database that does not exist, which must stay missing. Live progress and the first-root question need a terminal, so they are checked by hand with `script -qec 'vuta sync' log`, whose log replays the cursor movements. Hook commands in tests use only syntax that `sh -c` and `cmd /C` read the same way, such as `echo run>> hook.log` and `exit 3`; a test that needs shell-specific syntax adds one hook per platform.
+The scenarios live in `tests/sync.rs`, `tests/hooks.rs` and `tests/options.rs`. `tests/registry.rs` covers the registry commands, `scan`, `status`, the first-root error without a terminal, and the JSON of every command that has it. `tests/cli.rs` runs completion requests the way fish sends them, against a real registry and against a database that does not exist, which must stay missing. Live progress and the first-root question need a terminal, so they are checked by hand with `script -qec 'vuta sync' log`, whose log replays the cursor movements. Git refuses submodules at local paths unless `protocol.file.allow` permits them, so `tests/common` passes `protocol.file.allow=always` to vuta through `GIT_CONFIG_COUNT` (the unit tests can only check the steps that refuse before cloning). A rebase makes commits, so fixture clones get a repository-local committer identity and `commit.gpgsign=false`, and work on a CI runner with no global git identity. Hook commands in tests use only syntax that `sh -c` and `cmd /C` read the same way, such as `echo run>> hook.log` and `exit 3`; a test that needs shell-specific syntax adds one hook per platform.
 
 ### CI (`.github/workflows/ci.yml`)
 
@@ -1062,8 +1142,9 @@ Each item below is left out of v1 on purpose, and each has a known place to plug
 | Mercurial, Subversion, Fossil, Jujutsu | A new file in `vcs/` implementing `Vcs`, a new `VcsKind` variant, and a migration that widens the `repos.vcs` CHECK. `scan` gains detection of `.hg`, `.svn` and so on. The sync engine does not change. |
 | Registry export and import | Done: `vuta export` and `vuta import` (section 6). |
 | JSON output | Done for every command that lists or plans something (section 9). |
-| Submodules | A per-repository `submodules` column and one extra step after a fast-forward. |
-| Other update strategies | A per-repository `strategy` column (`ff-only`, `rebase`) read by `sync/worker.rs`. |
+| Submodules | Done: `vuta add`/`set --submodules`, a step after a clone or update (section 7). |
+| Other update strategies | Done: `vuta set --strategy rebase` beside the default `ff-only` (section 7). A `merge` strategy was left out on purpose: it would add a merge commit to the local branch on every diverged sync. |
+| Fast-forward around local changes | Done: `vuta set --allow-dirty` (section 7). |
 | Live progress | Done: a live line per worker on a terminal (section 9). |
 | Shell completions | Done: `vuta completions <shell>`, completing names from the registry through clap_complete's dynamic engine (section 6). |
 | Release binaries | Packages are built locally: `cargo xtask deb` and `cargo xtask msix` (docs/PACKAGING.md). Publishing them, and `cargo install vuta` once the crate is on crates.io, are still open. |
@@ -1071,4 +1152,3 @@ Each item below is left out of v1 on purpose, and each has a known place to plug
 ### Open questions
 
 - **Licence.** This document assumes `MIT OR Apache-2.0`, the usual choice for Rust tools.
-- **Dirty checkouts.** v1 skips any checkout with modified tracked files. Git can often fast-forward safely around local edits; allowing that would be a per-repository opt-in.

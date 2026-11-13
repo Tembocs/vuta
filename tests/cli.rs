@@ -43,7 +43,7 @@ fn doctor_reports_a_healthy_empty_database() {
         .success();
     let text = stdout(out.get_output());
     assert!(text.contains("git version"), "{text}");
-    assert!(text.contains("(schema 1)"), "{text}");
+    assert!(text.contains("(schema 2)"), "{text}");
     assert!(text.contains("none registered"), "{text}");
     assert!(env.db().is_file());
 }

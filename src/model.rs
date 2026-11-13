@@ -94,6 +94,7 @@ str_enum! {
         RemoteMismatch => "remote_mismatch",
         Disabled => "disabled",
         FetchOnly => "fetch_only",
+        RebaseStopped => "rebase_stopped",
     }
 }
 
@@ -103,7 +104,27 @@ str_enum! {
         Clone => "clone",
         Fetch => "fetch",
         FastForward => "fast_forward",
+        /// A rebase failed and could not be undone.
+        Rebase => "rebase",
         Interrupted => "interrupted",
+    }
+}
+
+str_enum! {
+    /// How a checkout with local commits follows its upstream.
+    pub enum Strategy ("strategy") {
+        /// Fast-forward only; local commits that diverge are skipped.
+        FfOnly => "ff-only",
+        /// Replay local commits onto upstream, on a clean tree only.
+        Rebase => "rebase",
+    }
+}
+
+str_enum! {
+    /// The stored form of `Submodules`.
+    pub enum SubmoduleOutcome ("submodule outcome") {
+        Ok => "ok",
+        Failed => "failed",
     }
 }
 
@@ -176,6 +197,11 @@ pub struct Repo {
     pub clone_filter: Option<String>,
     pub clone_depth: Option<u32>,
     pub enabled: bool,
+    /// Fast-forward around local changes that upstream does not touch.
+    pub allow_dirty: bool,
+    /// Update submodules after a clone or an update.
+    pub submodules: bool,
+    pub strategy: Strategy,
 }
 
 /// The cached result of a repository's latest sync.
@@ -244,6 +270,12 @@ pub struct RunResult {
     pub commits: Option<u32>,
     pub duration_ms: u64,
     pub hook_outcome: Option<HookOutcome>,
+    /// Local commits an update replayed onto upstream.
+    pub rebased: Option<u32>,
+    /// `None` when the submodule step did not run.
+    pub submodules: Option<SubmoduleOutcome>,
+    /// A skip's description, git's full error output for a failure, or
+    /// the submodule step's output when it failed.
     pub message: Option<String>,
 }
 
@@ -256,6 +288,8 @@ pub struct Tally {
     pub skipped: u32,
     pub failed: u32,
     pub hooks_failed: u32,
+    /// Repositories whose own outcome stands but whose submodules failed.
+    pub submodules_failed: u32,
 }
 
 impl Tally {
@@ -274,32 +308,55 @@ impl Tally {
     }
 }
 
-/// The one value a worker returns per repository.
+/// How the submodule step went. It runs after the repository itself was
+/// cloned or updated, so a failure is a note on that outcome, like a
+/// failed hook, rather than an outcome of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Submodules {
+    Ok,
+    /// `message` is git's full output, or why Vuta did not run git.
+    Failed {
+        message: String,
+    },
+}
+
+impl Submodules {
+    pub fn outcome(&self) -> SubmoduleOutcome {
+        match self {
+            Submodules::Ok => SubmoduleOutcome::Ok,
+            Submodules::Failed { .. } => SubmoduleOutcome::Failed,
+        }
+    }
+}
+
+/// The one value a worker returns per repository. `submodules` is `None`
+/// when the submodule step did not run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Cloned {
         rev: String,
+        submodules: Option<Submodules>,
     },
+    /// `rebased` counts local commits replayed onto upstream; 0 for a
+    /// fast-forward.
     Updated {
         old: String,
         new: String,
         commits: u32,
+        rebased: u32,
+        submodules: Option<Submodules>,
     },
-    /// `ahead` counts local commits not on the upstream.
+    /// `ahead` counts local commits not on the upstream. `submodules` is
+    /// set when submodules were missing or moved and were updated.
     UpToDate {
         rev: String,
         ahead: u32,
+        submodules: Option<Submodules>,
     },
     /// `behind` counts upstream commits not applied.
-    Skipped {
-        reason: SkipReason,
-        behind: u32,
-    },
+    Skipped { reason: SkipReason, behind: u32 },
     /// `message` is git's full error output; result lines show its last line.
-    Failed {
-        reason: FailReason,
-        message: String,
-    },
+    Failed { reason: FailReason, message: String },
 }
 
 impl Outcome {
@@ -316,7 +373,7 @@ impl Outcome {
     /// The checkout's revision after the sync, when known.
     pub fn rev(&self) -> Option<&str> {
         match self {
-            Outcome::Cloned { rev } | Outcome::UpToDate { rev, .. } => Some(rev),
+            Outcome::Cloned { rev, .. } | Outcome::UpToDate { rev, .. } => Some(rev),
             Outcome::Updated { new, .. } => Some(new),
             Outcome::Skipped { .. } | Outcome::Failed { .. } => None,
         }
@@ -326,13 +383,27 @@ impl Outcome {
     pub fn changed(&self) -> bool {
         matches!(self, Outcome::Cloned { .. } | Outcome::Updated { .. })
     }
+
+    /// How the submodule step went, when it ran.
+    pub fn submodules(&self) -> Option<&Submodules> {
+        match self {
+            Outcome::Cloned { submodules, .. }
+            | Outcome::Updated { submodules, .. }
+            | Outcome::UpToDate { submodules, .. } => submodules.as_ref(),
+            Outcome::Skipped { .. } | Outcome::Failed { .. } => None,
+        }
+    }
 }
 
 /// Why a repository was left untouched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
-    /// Tracked files have local modifications.
-    Dirty,
+    /// Tracked files have local modifications. `overlap` lists the ones
+    /// upstream also changes, when the repository allows fast-forwarding
+    /// around local changes; it is empty otherwise.
+    Dirty {
+        overlap: Vec<String>,
+    },
     /// Local commits and upstream commits both exist.
     Diverged {
         ahead: u32,
@@ -350,18 +421,25 @@ pub enum SkipReason {
     Disabled,
     /// `vuta sync --fetch-only` fetched but left the working tree alone.
     FetchOnly,
+    /// Git stopped a rebase part-way (`why`, such as a conflict) and Vuta
+    /// aborted it, so the checkout is as it was.
+    RebaseStopped {
+        ahead: u32,
+        why: String,
+    },
 }
 
 impl SkipReason {
     pub fn kind(&self) -> SkipKind {
         match self {
-            SkipReason::Dirty => SkipKind::Dirty,
+            SkipReason::Dirty { .. } => SkipKind::Dirty,
             SkipReason::Diverged { .. } => SkipKind::Diverged,
             SkipReason::Detached { .. } => SkipKind::Detached,
             SkipReason::NoUpstream { .. } => SkipKind::NoUpstream,
             SkipReason::RemoteMismatch { .. } => SkipKind::RemoteMismatch,
             SkipReason::Disabled => SkipKind::Disabled,
             SkipReason::FetchOnly => SkipKind::FetchOnly,
+            SkipReason::RebaseStopped { .. } => SkipKind::RebaseStopped,
         }
     }
 
@@ -369,8 +447,20 @@ impl SkipReason {
     /// result line shows the same words with colour.
     pub fn describe(&self, behind: u32) -> String {
         match self {
-            SkipReason::Dirty if behind == 0 => "local changes".to_owned(),
-            SkipReason::Dirty => format!("local changes; {}", count(behind, "commit") + " behind"),
+            SkipReason::Dirty { overlap } => {
+                let mut text = match overlap.as_slice() {
+                    [] => "local changes".to_owned(),
+                    [path] => format!("local changes overlap upstream in {path}"),
+                    paths => format!(
+                        "local changes overlap upstream in {}",
+                        count(paths.len() as u32, "file")
+                    ),
+                };
+                if behind > 0 {
+                    text.push_str(&format!("; {} behind", count(behind, "commit")));
+                }
+                text
+            }
             SkipReason::Diverged { ahead } => {
                 format!("{}, {behind} behind", count(*ahead, "local commit"))
             }
@@ -383,6 +473,10 @@ impl SkipReason {
             }
             SkipReason::Disabled => "disabled".to_owned(),
             SkipReason::FetchOnly => count(behind, "commit") + " behind",
+            SkipReason::RebaseStopped { ahead, why } => format!(
+                "rebase stopped ({why}) and was undone; {}, {behind} behind",
+                count(*ahead, "local commit")
+            ),
         }
     }
 }
@@ -423,6 +517,7 @@ mod tests {
             assert_eq!(kind.as_str().parse::<OutcomeKind>().unwrap(), *kind);
         }
         assert_eq!("UNIX".parse::<Platform>().unwrap(), Platform::Unix);
+        assert_eq!("FF-ONLY".parse::<Strategy>().unwrap(), Strategy::FfOnly);
         let err = "mac".parse::<Platform>().unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -432,11 +527,27 @@ mod tests {
 
     #[test]
     fn skip_descriptions() {
+        let dirty = |overlap: &[&str]| SkipReason::Dirty {
+            overlap: overlap.iter().map(|p| p.to_string()).collect(),
+        };
+        assert_eq!(dirty(&[]).describe(3), "local changes; 3 commits behind");
+        assert_eq!(dirty(&[]).describe(0), "local changes");
         assert_eq!(
-            SkipReason::Dirty.describe(3),
-            "local changes; 3 commits behind"
+            dirty(&["b.txt"]).describe(1),
+            "local changes overlap upstream in b.txt; 1 commit behind"
         );
-        assert_eq!(SkipReason::Dirty.describe(0), "local changes");
+        assert_eq!(
+            dirty(&["a", "b"]).describe(2),
+            "local changes overlap upstream in 2 files; 2 commits behind"
+        );
+        assert_eq!(
+            SkipReason::RebaseStopped {
+                ahead: 1,
+                why: "conflict in a.txt".into()
+            }
+            .describe(3),
+            "rebase stopped (conflict in a.txt) and was undone; 1 local commit, 3 behind"
+        );
         assert_eq!(
             SkipReason::Diverged { ahead: 2 }.describe(5),
             "2 local commits, 5 behind"

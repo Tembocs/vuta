@@ -5,7 +5,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{DbError, atomic};
-use crate::model::{HookOutcome, Outcome, Run, RunResult, RunSummary, Tally};
+use crate::model::{HookOutcome, Outcome, Run, RunResult, RunSummary, Submodules, Tally};
 
 const RUN_COLUMNS: &str = "r.id, r.started_at, r.finished_at, r.vuta_version, r.args, r.exit_code";
 
@@ -21,7 +21,8 @@ fn run_from_row(row: &Row) -> rusqlite::Result<Run> {
 }
 
 const RESULT_COLUMNS: &str = "rr.id, rr.run_id, r.started_at, rr.repo_id, p.name, rr.outcome, \
-     rr.reason, rr.old_rev, rr.new_rev, rr.commits, rr.duration_ms, rr.hook_outcome, rr.message";
+     rr.reason, rr.old_rev, rr.new_rev, rr.commits, rr.duration_ms, rr.hook_outcome, rr.message, \
+     rr.rebased, rr.submodules";
 
 const RESULT_FROM: &str = "FROM run_results rr JOIN runs r ON r.id = rr.run_id \
      JOIN repos p ON p.id = rr.repo_id";
@@ -41,6 +42,8 @@ fn result_from_row(row: &Row) -> rusqlite::Result<RunResult> {
         duration_ms: u64::try_from(row.get::<_, i64>(10)?).unwrap_or(0),
         hook_outcome: row.get(11)?,
         message: row.get(12)?,
+        rebased: row.get(13)?,
+        submodules: row.get(14)?,
     })
 }
 
@@ -80,14 +83,25 @@ pub fn record_result(
             (Some(reason.as_str()), None, None, Some(message.clone()))
         }
     };
+    // A failed submodule step keeps the outcome; its output is the message.
+    let submodules = outcome.submodules();
+    let message = match submodules {
+        Some(Submodules::Failed { message }) => Some(message.clone()),
+        _ => message,
+    };
+    let rebased = match outcome {
+        Outcome::Updated { rebased, .. } if *rebased > 0 => Some(*rebased),
+        _ => None,
+    };
     let new_rev = outcome.rev();
     let duration_ms = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
 
     atomic(conn, |tx| {
         tx.execute(
             "INSERT INTO run_results
-             (run_id, repo_id, outcome, reason, old_rev, new_rev, commits, duration_ms, message)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (run_id, repo_id, outcome, reason, old_rev, new_rev, commits, duration_ms, message,
+              rebased, submodules)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 run_id,
                 repo_id,
@@ -97,7 +111,9 @@ pub fn record_result(
                 new_rev,
                 commits,
                 duration_ms,
-                message
+                message,
+                rebased,
+                submodules.map(Submodules::outcome)
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -156,7 +172,8 @@ pub fn recent(conn: &Connection, limit: u32) -> Result<Vec<RunSummary>, DbError>
              COUNT(rr.id) FILTER (WHERE rr.outcome = 'up_to_date'),
              COUNT(rr.id) FILTER (WHERE rr.outcome = 'skipped'),
              COUNT(rr.id) FILTER (WHERE rr.outcome = 'failed'),
-             COUNT(rr.id) FILTER (WHERE rr.hook_outcome = 'failed')
+             COUNT(rr.id) FILTER (WHERE rr.hook_outcome = 'failed'),
+             COUNT(rr.id) FILTER (WHERE rr.submodules = 'failed')
          FROM runs r LEFT JOIN run_results rr ON rr.run_id = r.id
          GROUP BY r.id ORDER BY r.id DESC LIMIT ?1"
     ))?;
@@ -170,6 +187,7 @@ pub fn recent(conn: &Connection, limit: u32) -> Result<Vec<RunSummary>, DbError>
                 skipped: row.get(9)?,
                 failed: row.get(10)?,
                 hooks_failed: row.get(11)?,
+                submodules_failed: row.get(12)?,
             },
         })
     })?;
@@ -206,7 +224,7 @@ mod tests {
     use crate::db::repos::tests::add_repo;
     use crate::db::tests::fresh;
     use crate::db::{repos, roots};
-    use crate::model::{FailReason, OutcomeKind, SkipReason};
+    use crate::model::{FailReason, OutcomeKind, SkipReason, SubmoduleOutcome};
 
     #[test]
     fn a_run_records_results_and_updates_the_cache() {
@@ -222,10 +240,12 @@ mod tests {
             old: "aaa".into(),
             new: "bbb".into(),
             commits: 42,
+            rebased: 0,
+            submodules: None,
         };
         let zed_result = record_result(&conn, run, zed.id, &updated, ms).unwrap();
         let skipped = Outcome::Skipped {
-            reason: SkipReason::Dirty,
+            reason: SkipReason::Dirty { overlap: vec![] },
             behind: 3,
         };
         record_result(&conn, run, edit.id, &skipped, ms).unwrap();
@@ -307,7 +327,10 @@ mod tests {
             &conn,
             run,
             zed.id,
-            &Outcome::Cloned { rev: "abc".into() },
+            &Outcome::Cloned {
+                rev: "abc".into(),
+                submodules: None,
+            },
             d,
         )
         .unwrap();
@@ -322,6 +345,70 @@ mod tests {
         assert_eq!(
             results_for_repo(&conn, zed.id, 1).unwrap()[0].outcome,
             OutcomeKind::Failed
+        );
+    }
+
+    #[test]
+    fn rebases_and_submodule_failures_are_recorded() {
+        let (_dir, conn) = fresh();
+        let root = roots::add(&conn, "src", Path::new("/src"), false).unwrap();
+        let zed = add_repo(&conn, root.id, "zed", &[]);
+        let edit = add_repo(&conn, root.id, "edit", &[]);
+        let run = start(&conn, "0.1.0", "sync").unwrap();
+        let d = Duration::ZERO;
+        let rebased = Outcome::Updated {
+            old: "aaa".into(),
+            new: "bbb".into(),
+            commits: 3,
+            rebased: 2,
+            submodules: Some(Submodules::Ok),
+        };
+        record_result(&conn, run, zed.id, &rebased, d).unwrap();
+        let healed = Outcome::UpToDate {
+            rev: "ccc".into(),
+            ahead: 0,
+            submodules: Some(Submodules::Failed {
+                message: "fatal: clone of lib failed".into(),
+            }),
+        };
+        record_result(&conn, run, edit.id, &healed, d).unwrap();
+
+        let results = results_for_run(&conn, run).unwrap();
+        let summary: Vec<_> = results
+            .iter()
+            .map(|r| {
+                (
+                    r.repo_name.as_str(),
+                    r.outcome,
+                    r.rebased,
+                    r.submodules,
+                    r.message.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    "edit",
+                    OutcomeKind::UpToDate,
+                    None,
+                    Some(SubmoduleOutcome::Failed),
+                    Some("fatal: clone of lib failed")
+                ),
+                (
+                    "zed",
+                    OutcomeKind::Updated,
+                    Some(2),
+                    Some(SubmoduleOutcome::Ok),
+                    None
+                ),
+            ]
+        );
+        let tally = recent(&conn, 1).unwrap()[0].tally;
+        assert_eq!(
+            (tally.up_to_date, tally.updated, tally.submodules_failed),
+            (1, 1, 1)
         );
     }
 

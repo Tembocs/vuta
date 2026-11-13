@@ -11,7 +11,7 @@ use crate::Error;
 use crate::cli::{AddArgs, Format};
 use crate::db;
 use crate::db::repos::{NewRepo, Selection};
-use crate::model::VcsKind;
+use crate::model::{Strategy, VcsKind};
 use crate::paths;
 use crate::sync;
 use crate::ui::Styled;
@@ -62,6 +62,9 @@ pub fn run(ctx: &mut Ctx, args: &AddArgs) -> Result<ExitCode, Error> {
             branch: args.branch.as_deref(),
             clone_filter: args.filter.as_deref(),
             clone_depth: args.depth,
+            allow_dirty: false,
+            submodules: args.submodules,
+            strategy: Strategy::FfOnly,
             tags: &args.tags,
         },
     )?;

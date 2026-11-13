@@ -32,7 +32,10 @@ use rusqlite::Connection;
 
 use crate::Error;
 use crate::cli::{Cli, Command, DbCommand};
-use crate::model::{FailReason, HookOutcome, Outcome, OutcomeKind, Repo, Root, RunResult};
+use crate::model::{
+    FailReason, HookOutcome, Outcome, OutcomeKind, Repo, Root, RunResult, Strategy,
+    SubmoduleOutcome, Submodules,
+};
 use crate::paths;
 use crate::proc::{Captured, Tracer};
 use crate::ui::table::Cell;
@@ -309,16 +312,30 @@ pub fn stored_status(result: &RunResult, glyphs: &Glyphs) -> Cell {
 /// matches the live result line.
 pub fn stored_detail(result: &RunResult, glyphs: &Glyphs) -> Styled {
     let rev = || result.new_rev.clone().unwrap_or_default();
+    let submodules = || {
+        result.submodules.map(|outcome| match outcome {
+            SubmoduleOutcome::Ok => Submodules::Ok,
+            SubmoduleOutcome::Failed => Submodules::Failed {
+                message: result.message.clone().unwrap_or_default(),
+            },
+        })
+    };
     let outcome = match result.outcome {
-        OutcomeKind::Cloned => Outcome::Cloned { rev: rev() },
+        OutcomeKind::Cloned => Outcome::Cloned {
+            rev: rev(),
+            submodules: submodules(),
+        },
         OutcomeKind::Updated => Outcome::Updated {
             old: result.old_rev.clone().unwrap_or_default(),
             new: rev(),
             commits: result.commits.unwrap_or(0),
+            rebased: result.rebased.unwrap_or(0),
+            submodules: submodules(),
         },
         OutcomeKind::UpToDate => Outcome::UpToDate {
             rev: rev(),
             ahead: 0,
+            submodules: submodules(),
         },
         OutcomeKind::Skipped => {
             let mut out = Styled::new();
@@ -335,6 +352,19 @@ pub fn stored_detail(result: &RunResult, glyphs: &Glyphs) -> Styled {
         },
     };
     report::detail(&outcome, glyphs)
+}
+
+/// How a repository syncs, in the words `vuta set` takes: the strategy,
+/// then `allow-dirty` and `submodules` when they are on.
+pub fn sync_options(allow_dirty: bool, submodules: bool, strategy: Strategy) -> Vec<&'static str> {
+    let mut options = vec![strategy.as_str()];
+    if allow_dirty {
+        options.push("allow-dirty");
+    }
+    if submodules {
+        options.push("submodules");
+    }
+    options
 }
 
 /// How a stored result's hooks went, for tables. Empty when it had none.

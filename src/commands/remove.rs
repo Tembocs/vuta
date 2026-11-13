@@ -36,7 +36,7 @@ pub fn run(ctx: &mut Ctx, args: &RemoveArgs) -> Result<ExitCode, Error> {
             .into());
         }
         if !args.yes {
-            let dirty = vcs.is_dirty(&path).unwrap_or(false);
+            let dirty = vcs.is_dirty(&path, false).unwrap_or(false);
             let question = format!(
                 "Delete {}{}?",
                 path.display(),

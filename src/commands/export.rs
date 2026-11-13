@@ -75,6 +75,9 @@ pub fn run(ctx: &mut Ctx, args: &ExportArgs) -> Result<ExitCode, Error> {
                     clone_filter: repo.clone_filter,
                     clone_depth: repo.clone_depth,
                     enabled: repo.enabled,
+                    allow_dirty: repo.allow_dirty,
+                    submodules: repo.submodules,
+                    strategy: repo.strategy.as_str().to_owned(),
                     tags: entry.tags,
                 }
             })

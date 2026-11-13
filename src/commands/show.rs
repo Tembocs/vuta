@@ -4,13 +4,13 @@ use std::process::ExitCode;
 
 use super::{
     Ctx, checkout_path, now_unix, print_json, repo_by_name, root_of, stored_detail, stored_hooks,
-    stored_status,
+    stored_status, sync_options,
 };
 use crate::Error;
 use crate::cli::{Format, ShowArgs};
 use crate::db;
 use crate::db::repos::Selection;
-use crate::model::{OutcomeKind, short_rev};
+use crate::model::{OutcomeKind, SubmoduleOutcome, short_rev};
 use crate::ui::table::{Cell, Table};
 use crate::ui::theme::THEME;
 use crate::ui::{Styled, fmt_age, json, pad, report};
@@ -96,6 +96,13 @@ pub fn run(ctx: &mut Ctx, args: &ShowArgs) -> Result<ExitCode, Error> {
         field("clone", &text(&clone.join(", "), anstyle::Style::new()));
     }
     field(
+        "sync",
+        &text(
+            &sync_options(repo.allow_dirty, repo.submodules, repo.strategy).join(", "),
+            anstyle::Style::new(),
+        ),
+    );
+    field(
         "enabled",
         &if repo.enabled {
             text("yes", anstyle::Style::new())
@@ -167,10 +174,13 @@ pub fn run(ctx: &mut Ctx, args: &ShowArgs) -> Result<ExitCode, Error> {
         ui.table(&table);
 
         // The result line shows only the last line of git's output; the
-        // newest failure is shown in full.
+        // newest failure, of the repository or of its submodules, is shown
+        // in full.
         let failure = results
             .iter()
-            .find(|r| r.outcome == OutcomeKind::Failed)
+            .find(|r| {
+                r.outcome == OutcomeKind::Failed || r.submodules == Some(SubmoduleOutcome::Failed)
+            })
             .and_then(|r| r.message.as_deref().map(|m| (r, m.trim())))
             .filter(|(_, message)| !message.is_empty());
         if let Some((result, message)) = failure {

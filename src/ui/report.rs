@@ -13,7 +13,7 @@ use anstyle::Style;
 use super::theme::{Glyphs, THEME};
 use super::{Styled, fmt_duration, pad};
 use crate::model::{
-    FailReason, HookEnd, Outcome, OutcomeKind, SkipReason, Tally, count, short_rev,
+    FailReason, HookEnd, Outcome, OutcomeKind, SkipReason, Submodules, Tally, count, short_rev,
 };
 use crate::proc::last_line;
 
@@ -72,22 +72,39 @@ pub fn result_line(line: &ResultLine, glyphs: &Glyphs) -> String {
 pub fn detail(outcome: &Outcome, glyphs: &Glyphs) -> Styled {
     let mut out = Styled::new();
     match outcome {
-        Outcome::Cloned { rev } => {
+        Outcome::Cloned { rev, submodules } => {
             out.push(short_rev(rev), THEME.rev);
+            submodule_note(&mut out, submodules.as_ref());
         }
-        Outcome::Updated { old, new, commits } => {
+        Outcome::Updated {
+            old,
+            new,
+            commits,
+            rebased,
+            submodules,
+        } => {
             out.push(short_rev(old), THEME.rev)
                 .plain(&format!(" {} ", glyphs.arrow))
                 .push(short_rev(new), THEME.rev)
                 .plain("   ");
             counted(&mut out, *commits, "commit");
+            if *rebased > 0 {
+                out.plain("; rebased ");
+                counted(&mut out, *rebased, "local commit");
+            }
+            submodule_note(&mut out, submodules.as_ref());
         }
-        Outcome::UpToDate { rev, ahead } => {
+        Outcome::UpToDate {
+            rev,
+            ahead,
+            submodules,
+        } => {
             out.push(short_rev(rev), THEME.rev);
             if *ahead > 0 {
                 out.plain("   ");
                 counted(&mut out, *ahead, "local commit");
             }
+            submodule_note(&mut out, submodules.as_ref());
         }
         Outcome::Skipped { reason, behind } => skip_detail(&mut out, reason, *behind),
         Outcome::Failed { reason, message } => {
@@ -109,11 +126,38 @@ pub fn detail(outcome: &Outcome, glyphs: &Glyphs) -> Styled {
     out
 }
 
+/// `   submodules ok`, or `   submodules failed: <git's last line>` in the
+/// failure colour.
+fn submodule_note(out: &mut Styled, submodules: Option<&Submodules>) {
+    match submodules {
+        None => {}
+        Some(Submodules::Ok) => {
+            out.plain("   submodules ok");
+        }
+        Some(Submodules::Failed { message }) => {
+            let line = last_line(message).map(strip_git_prefix).unwrap_or("");
+            let text = if line.is_empty() {
+                "submodules failed".to_owned()
+            } else {
+                format!("submodules failed: {line}")
+            };
+            out.plain("   ").push(&text, THEME.err);
+        }
+    }
+}
+
 /// The styled form of `SkipReason::describe`.
 fn skip_detail(out: &mut Styled, reason: &SkipReason, behind: u32) {
     match reason {
-        SkipReason::Dirty => {
-            out.plain("local changes");
+        SkipReason::Dirty { overlap } => {
+            match overlap.as_slice() {
+                [] => out.plain("local changes"),
+                [path] => out.plain(&format!("local changes overlap upstream in {path}")),
+                paths => out.plain(&format!(
+                    "local changes overlap upstream in {}",
+                    count(paths.len() as u32, "file")
+                )),
+            };
             if behind > 0 {
                 out.plain("; ");
                 counted(out, behind, "commit");
@@ -144,6 +188,13 @@ fn skip_detail(out: &mut Styled, reason: &SkipReason, behind: u32) {
         SkipReason::FetchOnly => {
             counted(out, behind, "commit");
             out.plain(" behind");
+        }
+        SkipReason::RebaseStopped { ahead, why } => {
+            out.plain(&format!("rebase stopped ({why}) and was undone; "));
+            counted(out, *ahead, "local commit");
+            out.plain(", ")
+                .push(&behind.to_string(), THEME.rev)
+                .plain(" behind");
         }
     }
 }
@@ -254,6 +305,14 @@ pub fn summary_line(tally: &Tally, elapsed: Duration, glyphs: &Glyphs) -> String
         };
         parts.push((tally.hooks_failed, noun.to_owned(), THEME.err));
     }
+    if tally.submodules_failed > 0 {
+        let noun = if tally.submodules_failed == 1 {
+            "submodule update failed"
+        } else {
+            "submodule updates failed"
+        };
+        parts.push((tally.submodules_failed, noun.to_owned(), THEME.err));
+    }
     let mut out = Styled::new();
     for (i, (n, label, style)) in parts.iter().enumerate() {
         if i > 0 {
@@ -340,6 +399,7 @@ mod tests {
                 Outcome::UpToDate {
                     rev: A.into(),
                     ahead: 0,
+                    submodules: None,
                 },
                 1200,
                 "[1/9] = up to date  surrealdb   a91c0de                                 1.2s",
@@ -349,13 +409,15 @@ mod tests {
                     old: B.into(),
                     new: C.into(),
                     commits: 42,
+                    rebased: 0,
+                    submodules: None,
                 },
                 6100,
                 "[1/9] ✓ updated     surrealdb   3f9a2c1 → 8be04d7   42 commits          6.1s",
             ),
             (
                 Outcome::Skipped {
-                    reason: SkipReason::Dirty,
+                    reason: SkipReason::Dirty { overlap: vec![] },
                     behind: 3,
                 },
                 900,
@@ -370,7 +432,10 @@ mod tests {
                 "[1/9] ✗ failed      surrealdb   fetch: could not resolve host           0.4s",
             ),
             (
-                Outcome::Cloned { rev: A.into() },
+                Outcome::Cloned {
+                    rev: A.into(),
+                    submodules: None,
+                },
                 38_400,
                 "[1/9] + cloned      surrealdb   a91c0de                                38.4s",
             ),
@@ -378,6 +443,7 @@ mod tests {
                 Outcome::UpToDate {
                     rev: A.into(),
                     ahead: 2,
+                    submodules: None,
                 },
                 100,
                 "[1/9] = up to date  surrealdb   a91c0de   2 local commits               0.1s",
@@ -386,6 +452,45 @@ mod tests {
         for (outcome, ms, expected) in cases {
             assert_eq!(line(1, "surrealdb", &outcome, ms), expected);
         }
+    }
+
+    #[test]
+    fn rebases_and_submodules_are_noted() {
+        let detail = |outcome: &Outcome| strip(&detail(outcome, &Glyphs::UNICODE).into_string());
+        assert_eq!(
+            detail(&Outcome::Updated {
+                old: B.into(),
+                new: C.into(),
+                commits: 3,
+                rebased: 1,
+                submodules: Some(Submodules::Ok),
+            }),
+            "3f9a2c1 → 8be04d7   3 commits; rebased 1 local commit   submodules ok"
+        );
+        assert_eq!(
+            detail(&Outcome::UpToDate {
+                rev: A.into(),
+                ahead: 0,
+                submodules: Some(Submodules::Failed {
+                    message: "Cloning...\nfatal: clone of 'lib' failed\n".into()
+                }),
+            }),
+            "a91c0de   submodules failed: clone of 'lib' failed"
+        );
+        let failed = detail(&Outcome::Cloned {
+            rev: A.into(),
+            submodules: Some(Submodules::Failed {
+                message: String::new(),
+            }),
+        });
+        assert_eq!(failed, "a91c0de   submodules failed");
+        assert_eq!(
+            detail(&Outcome::Failed {
+                reason: FailReason::Rebase,
+                message: "git stopped the rebase\nfinish or abort it by hand".into()
+            }),
+            "rebase: finish or abort it by hand"
+        );
     }
 
     #[test]
@@ -401,7 +506,15 @@ mod tests {
             };
             strip(&live_line(&line, &Glyphs::UNICODE))
         };
-        let result = line(1, "surrealdb", &Outcome::Cloned { rev: A.into() }, 100);
+        let result = line(
+            1,
+            "surrealdb",
+            &Outcome::Cloned {
+                rev: A.into(),
+                submodules: None,
+            },
+            100,
+        );
         let cloning = live("surrealdb", true, 12, 200);
         assert_eq!(cloning, "      ▸ cloning     surrealdb   12s");
         // The name starts in the same column as on a result line.
@@ -427,6 +540,8 @@ mod tests {
             old: B.into(),
             new: C.into(),
             commits: 1,
+            rebased: 0,
+            submodules: None,
         };
         let line = ResultLine {
             index: 2,
@@ -445,7 +560,17 @@ mod tests {
     #[test]
     fn styled_skip_details_match_stored_text() {
         let reasons = [
-            SkipReason::Dirty,
+            SkipReason::Dirty { overlap: vec![] },
+            SkipReason::Dirty {
+                overlap: vec!["b.txt".into()],
+            },
+            SkipReason::Dirty {
+                overlap: vec!["a".into(), "b".into()],
+            },
+            SkipReason::RebaseStopped {
+                ahead: 2,
+                why: "conflict in a.txt".into(),
+            },
             SkipReason::Diverged { ahead: 2 },
             SkipReason::Detached { rev: A.into() },
             SkipReason::NoUpstream {
@@ -503,6 +628,7 @@ mod tests {
             skipped: 1,
             failed: 1,
             hooks_failed: 0,
+            submodules_failed: 0,
         };
         assert_eq!(
             strip(&summary_line(
@@ -515,6 +641,7 @@ mod tests {
         let tally = Tally {
             updated: 1,
             hooks_failed: 2,
+            submodules_failed: 1,
             ..Default::default()
         };
         assert_eq!(
@@ -523,7 +650,8 @@ mod tests {
                 Duration::from_secs(2),
                 &Glyphs::ASCII
             )),
-            "0 cloned - 1 updated - 0 up to date - 0 skipped - 0 failed - 2 hooks failed   in 2.0s"
+            "0 cloned - 1 updated - 0 up to date - 0 skipped - 0 failed - 2 hooks failed \
+             - 1 submodule update failed   in 2.0s"
         );
         assert_eq!(
             strip(&hook_started_line("v", "make", &Glyphs::UNICODE)),

@@ -61,6 +61,17 @@ pub fn run(ctx: &mut Ctx, args: &SetArgs) -> Result<ExitCode, Error> {
     } else if args.disable {
         changes.enabled = Some(false);
     }
+    if args.allow_dirty {
+        changes.allow_dirty = Some(true);
+    } else if args.no_allow_dirty {
+        changes.allow_dirty = Some(false);
+    }
+    if args.submodules {
+        changes.submodules = Some(true);
+    } else if args.no_submodules {
+        changes.submodules = Some(false);
+    }
+    changes.strategy = args.strategy;
 
     db::repos::update(&conn, repo.id, &changes)?;
     let updated = repo_by_name(&conn, changes.name.as_deref().unwrap_or(&repo.name))?;

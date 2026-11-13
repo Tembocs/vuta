@@ -154,7 +154,11 @@ pub fn run(jobs: Vec<Job>, options: &Options, stop: &AtomicBool, mut on_event: i
 pub fn exit_code(tally: &Tally, strict: bool, interrupted: bool) -> u8 {
     if interrupted {
         exit::INTERRUPTED
-    } else if tally.failed > 0 || tally.hooks_failed > 0 || (strict && tally.skipped > 0) {
+    } else if tally.failed > 0
+        || tally.hooks_failed > 0
+        || tally.submodules_failed > 0
+        || (strict && tally.skipped > 0)
+    {
         exit::FAILED
     } else {
         exit::OK
@@ -206,7 +210,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::model::{OutcomeKind, Repo};
+    use crate::model::{OutcomeKind, Repo, Strategy};
     use crate::testutil::Fixture;
 
     fn jobs(fixture: &Fixture, n: i64) -> Vec<Job> {
@@ -223,6 +227,9 @@ mod tests {
                     clone_filter: None,
                     clone_depth: None,
                     enabled: true,
+                    allow_dirty: false,
+                    submodules: false,
+                    strategy: Strategy::FfOnly,
                 },
                 path: fixture.path("work").join(format!("r{id}")),
             })

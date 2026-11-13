@@ -6,7 +6,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 
 use super::{DbError, atomic, unique_violation};
-use crate::model::{LastSync, Repo, RepoEntry, VcsKind};
+use crate::model::{LastSync, Repo, RepoEntry, Strategy, VcsKind};
 
 /// A repository to register.
 #[derive(Debug, Clone)]
@@ -20,6 +20,9 @@ pub struct NewRepo<'a> {
     pub branch: Option<&'a str>,
     pub clone_filter: Option<&'a str>,
     pub clone_depth: Option<u32>,
+    pub allow_dirty: bool,
+    pub submodules: bool,
+    pub strategy: Strategy,
     pub tags: &'a [String],
 }
 
@@ -46,10 +49,16 @@ pub struct Changes {
     pub clone_filter: Option<Option<String>>,
     pub clone_depth: Option<Option<u32>>,
     pub enabled: Option<bool>,
+    pub allow_dirty: Option<bool>,
+    pub submodules: Option<bool>,
+    pub strategy: Option<Strategy>,
 }
 
 const COLUMNS: &str = "r.id, r.name, r.root_id, r.rel_path, r.vcs, r.url, r.branch, \
-                       r.clone_filter, r.clone_depth, r.enabled";
+                       r.clone_filter, r.clone_depth, r.enabled, r.allow_dirty, \
+                       r.submodules, r.strategy";
+/// How many columns `COLUMNS` selects; `select` reads more after them.
+const COLUMN_COUNT: usize = 13;
 
 fn from_row(row: &Row) -> rusqlite::Result<Repo> {
     Ok(Repo {
@@ -63,6 +72,9 @@ fn from_row(row: &Row) -> rusqlite::Result<Repo> {
         clone_filter: row.get(7)?,
         clone_depth: row.get(8)?,
         enabled: row.get(9)?,
+        allow_dirty: row.get(10)?,
+        submodules: row.get(11)?,
+        strategy: row.get(12)?,
     })
 }
 
@@ -82,8 +94,9 @@ fn conflict(err: rusqlite::Error, name: &str, rel_path: &str) -> DbError {
 pub fn insert(conn: &Connection, new: &NewRepo) -> Result<Repo, DbError> {
     let id = atomic::<_, DbError>(conn, |tx| {
         tx.execute(
-        "INSERT INTO repos (name, root_id, rel_path, vcs, url, branch, clone_filter, clone_depth)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO repos (name, root_id, rel_path, vcs, url, branch, clone_filter, clone_depth,
+                            allow_dirty, submodules, strategy)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             new.name,
             new.root_id,
@@ -92,7 +105,10 @@ pub fn insert(conn: &Connection, new: &NewRepo) -> Result<Repo, DbError> {
             new.url,
             new.branch,
             new.clone_filter,
-            new.clone_depth
+            new.clone_depth,
+            new.allow_dirty,
+            new.submodules,
+            new.strategy
         ],
     )
     .map_err(|err| conflict(err, new.name, new.rel_path))?;
@@ -111,6 +127,9 @@ pub fn insert(conn: &Connection, new: &NewRepo) -> Result<Repo, DbError> {
         clone_filter: new.clone_filter.map(str::to_owned),
         clone_depth: new.clone_depth,
         enabled: true,
+        allow_dirty: new.allow_dirty,
+        submodules: new.submodules,
+        strategy: new.strategy,
     })
 }
 
@@ -162,11 +181,11 @@ pub fn select(conn: &Connection, selection: &Selection) -> Result<Vec<RepoEntry>
         Ok((
             from_row(row)?,
             LastSync {
-                rev: row.get(10)?,
-                outcome: row.get(11)?,
-                at: row.get(12)?,
+                rev: row.get(COLUMN_COUNT)?,
+                outcome: row.get(COLUMN_COUNT + 1)?,
+                at: row.get(COLUMN_COUNT + 2)?,
             },
-            row.get::<_, String>(13)?,
+            row.get::<_, String>(COLUMN_COUNT + 3)?,
         ))
     })?;
     rows.map(|row| {
@@ -232,6 +251,18 @@ pub fn update(conn: &Connection, id: i64, changes: &Changes) -> Result<(), DbErr
     if let Some(enabled) = changes.enabled {
         sets.push("enabled = ?");
         values.push(Value::Integer(enabled.into()));
+    }
+    if let Some(allow_dirty) = changes.allow_dirty {
+        sets.push("allow_dirty = ?");
+        values.push(Value::Integer(allow_dirty.into()));
+    }
+    if let Some(submodules) = changes.submodules {
+        sets.push("submodules = ?");
+        values.push(Value::Integer(submodules.into()));
+    }
+    if let Some(strategy) = changes.strategy {
+        sets.push("strategy = ?");
+        values.push(Value::Text(strategy.as_str().to_owned()));
     }
     if sets.is_empty() {
         return Ok(());
@@ -322,6 +353,9 @@ pub(crate) mod tests {
                 branch: None,
                 clone_filter: None,
                 clone_depth: None,
+                allow_dirty: false,
+                submodules: false,
+                strategy: Strategy::FfOnly,
                 tags: &tags,
             },
         )
@@ -359,6 +393,9 @@ pub(crate) mod tests {
                 branch: None,
                 clone_filter: None,
                 clone_depth: None,
+                allow_dirty: false,
+                submodules: false,
+                strategy: Strategy::FfOnly,
                 tags: &[],
             },
         )
@@ -442,6 +479,27 @@ pub(crate) mod tests {
             (repo.name.as_str(), repo.branch.as_deref(), repo.clone_depth),
             ("mojo", Some("main"), Some(1))
         );
+        assert_eq!(
+            (repo.allow_dirty, repo.submodules, repo.strategy),
+            (false, false, Strategy::FfOnly)
+        );
+        update(
+            &conn,
+            repo.id,
+            &Changes {
+                allow_dirty: Some(true),
+                submodules: Some(true),
+                strategy: Some(Strategy::Rebase),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let options = by_id(&conn, repo.id).unwrap().unwrap();
+        assert_eq!(
+            (options.allow_dirty, options.submodules, options.strategy),
+            (true, true, Strategy::Rebase)
+        );
+        assert!(by_name(&conn, "mojo").unwrap().unwrap().submodules);
 
         update(
             &conn,

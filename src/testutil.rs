@@ -71,13 +71,55 @@ impl Fixture {
     /// Commit to the seed and push; returns the new upstream revision.
     pub fn push_commit(&mut self) -> String {
         self.commits += 1;
+        let content = format!("{}\n", self.commits);
+        self.push_file("file.txt", &content)
+    }
+
+    /// Write `name` in the seed, commit and push; returns the new upstream
+    /// revision.
+    pub fn push_file(&mut self, name: &str, content: &str) -> String {
         let seed = self.path("seed");
-        fs::write(seed.join("file.txt"), format!("{}\n", self.commits)).unwrap();
-        git(&seed, &["add", "file.txt"]);
+        fs::write(seed.join(name), content).unwrap();
+        git(&seed, &["add", name]);
+        git(&seed, &["commit", "-q", "-m", &format!("change {name}")]);
+        git(&seed, &["push", "-q", "origin", "HEAD:main"]);
+        self.upstream_rev()
+    }
+
+    /// Add `lib`'s upstream as a submodule at `path` in the seed, and push.
+    /// Returns the new upstream revision. Git refuses submodules at local
+    /// paths unless `protocol.file.allow` says otherwise, so this setup and
+    /// any test that has Vuta clone such a submodule must pass it.
+    pub fn push_submodule(&mut self, path: &str, lib: &Fixture) -> String {
+        let seed = self.path("seed");
         git(
             &seed,
-            &["commit", "-m", &format!("commit {}", self.commits)],
+            &[
+                "-c",
+                ALLOW_FILE_SUBMODULES,
+                "submodule",
+                "add",
+                "-q",
+                &lib.url(),
+                path,
+            ],
         );
+        git(
+            &seed,
+            &["commit", "-q", "-m", &format!("add submodule {path}")],
+        );
+        git(&seed, &["push", "-q", "origin", "HEAD:main"]);
+        self.upstream_rev()
+    }
+
+    /// Point the seed's submodule at `path` to its upstream's newest
+    /// commit, commit and push. Returns the new upstream revision.
+    pub fn bump_submodule(&mut self, path: &str) -> String {
+        let seed = self.path("seed");
+        let sub = seed.join(path);
+        git(&sub, &["fetch", "-q", "origin"]);
+        git(&sub, &["checkout", "-q", "origin/main"]);
+        git(&seed, &["commit", "-q", "-am", &format!("bump {path}")]);
         git(&seed, &["push", "-q", "origin", "HEAD:main"]);
         self.upstream_rev()
     }
@@ -94,6 +136,27 @@ impl Fixture {
         }
         let dest_text = dest.to_str().unwrap();
         git(self.dir.path(), &["clone", "-q", &self.url(), dest_text]);
+        identify(dest);
         dest.to_path_buf()
     }
+}
+
+/// The git setting that lets submodules live at local paths.
+pub const ALLOW_FILE_SUBMODULES: &str = "protocol.file.allow=always";
+
+/// Give a checkout its own committer identity and turn off signing, so
+/// that a rebase run by Vuta (which sets neither) can make commits on a
+/// machine with no global git identity, such as a CI runner.
+pub fn identify(checkout: &Path) {
+    git(checkout, &["config", "user.name", "Vuta Test"]);
+    git(checkout, &["config", "user.email", "test@example.com"]);
+    git(checkout, &["config", "commit.gpgsign", "false"]);
+}
+
+/// Commit `content` to `name` in a checkout, without pushing.
+pub fn local_commit(checkout: &Path, name: &str, content: &str) -> String {
+    fs::write(checkout.join(name), content).unwrap();
+    git(checkout, &["add", name]);
+    git(checkout, &["commit", "-q", "-m", &format!("local {name}")]);
+    git(checkout, &["rev-parse", "HEAD"])
 }

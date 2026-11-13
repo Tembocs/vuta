@@ -12,7 +12,7 @@ use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 
 use crate::commands::completions;
 
-use crate::model::Platform;
+use crate::model::{Platform, Strategy};
 use crate::ui::Verbosity;
 
 const HELP_STYLES: Styles = Styles::styled()
@@ -109,7 +109,8 @@ pub enum Command {
     /// Everything about one repository
     Show(ShowArgs),
 
-    /// Change a repository's name, URL, branch, path or enabled state
+    /// Change a repository's record: name, URL, branch, path, enabled
+    /// state and how it syncs
     Set(SetArgs),
 
     /// Add or remove tags, for example: vuta tag zed +rust -editor
@@ -214,6 +215,9 @@ pub struct AddArgs {
     /// Shallow clone with this many commits
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub depth: Option<u32>,
+    /// Update submodules after each clone and update
+    #[arg(long)]
+    pub submodules: bool,
     /// Only register the repository; the next sync clones it
     #[arg(long)]
     pub no_clone: bool,
@@ -361,6 +365,23 @@ pub struct SetArgs {
     /// Leave the repository out of syncs
     #[arg(long, group = "change")]
     pub disable: bool,
+    /// Fast-forward even with local changes, as long as upstream does not
+    /// change the same files
+    #[arg(long, group = "change", conflicts_with = "no_allow_dirty")]
+    pub allow_dirty: bool,
+    /// Skip the checkout whenever it has local changes (the default)
+    #[arg(long, group = "change")]
+    pub no_allow_dirty: bool,
+    /// Update submodules after each clone and update
+    #[arg(long, group = "change", conflicts_with = "no_submodules")]
+    pub submodules: bool,
+    /// Leave submodules alone (the default)
+    #[arg(long, group = "change")]
+    pub no_submodules: bool,
+    /// How to follow upstream when there are local commits: ff-only (the
+    /// default) skips the checkout; rebase replays them onto upstream
+    #[arg(long, value_name = "STRATEGY", group = "change", value_parser = strategy_parser())]
+    pub strategy: Option<Strategy>,
 }
 
 #[derive(Debug, Args)]
@@ -420,6 +441,11 @@ pub enum HookCommand {
         #[arg(add = ArgValueCandidates::new(completions::hook_ids))]
         id: i64,
     },
+}
+
+fn strategy_parser() -> impl TypedValueParser<Value = Strategy> {
+    PossibleValuesParser::new(Strategy::ALL.iter().map(|s| s.as_str()))
+        .map(|s| s.parse::<Strategy>().expect("a listed strategy parses"))
 }
 
 fn platform_parser() -> impl TypedValueParser<Value = Platform> {

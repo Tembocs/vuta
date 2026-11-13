@@ -35,6 +35,9 @@ pub fn repo(entry: &RepoEntry, path: &Path) -> Value {
         "clone_filter": repo.clone_filter,
         "clone_depth": repo.clone_depth,
         "enabled": repo.enabled,
+        "allow_dirty": repo.allow_dirty,
+        "submodules": repo.submodules,
+        "strategy": repo.strategy.as_str(),
         "tags": entry.tags,
         "last_rev": entry.last.rev,
         "last_outcome": entry.last.outcome.map(|o| o.as_str()),
@@ -51,6 +54,7 @@ pub fn tally(tally: &Tally) -> Value {
         "skipped": tally.skipped,
         "failed": tally.failed,
         "hooks_failed": tally.hooks_failed,
+        "submodules_failed": tally.submodules_failed,
     })
 }
 
@@ -67,8 +71,10 @@ pub fn run(run: &Run) -> Value {
 }
 
 /// One repository's result in a run. `commits` counts the commits brought
-/// in (updated) or not applied (skipped); `message` holds a skip's
-/// description or git's full error output.
+/// in (updated) or not applied (skipped); `rebased` the local commits an
+/// update replayed. `submodules` is `ok` or `failed` when the submodule
+/// step ran. `message` holds a skip's description, or git's full error
+/// output for a failure or a failed submodule step.
 pub fn result(result: &RunResult) -> Value {
     json!({
         "run_id": result.run_id,
@@ -80,6 +86,8 @@ pub fn result(result: &RunResult) -> Value {
         "commits": result.commits,
         "duration_ms": result.duration_ms,
         "hook_outcome": result.hook_outcome.map(|h| h.as_str()),
+        "rebased": result.rebased,
+        "submodules": result.submodules.map(|s| s.as_str()),
         "message": result.message,
     })
 }
@@ -127,7 +135,7 @@ pub fn path_text(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{HookOutcome, LastSync, OutcomeKind, Repo, VcsKind};
+    use crate::model::{HookOutcome, LastSync, OutcomeKind, Repo, Strategy, VcsKind};
 
     #[test]
     fn missing_values_are_null_not_absent() {
@@ -143,6 +151,9 @@ mod tests {
                 clone_filter: None,
                 clone_depth: None,
                 enabled: true,
+                allow_dirty: false,
+                submodules: true,
+                strategy: Strategy::Rebase,
             },
             root_name: "src".into(),
             tags: vec!["rust".into()],
@@ -152,6 +163,14 @@ mod tests {
         assert_eq!(value["branch"], Value::Null);
         assert_eq!(value["last_outcome"], Value::Null);
         assert_eq!(value["tags"], json!(["rust"]));
+        assert_eq!(
+            (
+                &value["allow_dirty"],
+                &value["submodules"],
+                &value["strategy"]
+            ),
+            (&json!(false), &json!(true), &json!("rebase"))
+        );
         assert!(value.as_object().unwrap().contains_key("last_synced_at"));
     }
 
@@ -170,11 +189,14 @@ mod tests {
             commits: None,
             duration_ms: 1200,
             hook_outcome: Some(HookOutcome::NotRun),
+            rebased: None,
+            submodules: None,
             message: None,
         };
         let value = result(&r);
         assert_eq!(value["outcome"], "up_to_date");
         assert_eq!(value["hook_outcome"], "not_run");
         assert_eq!(value["duration_ms"], 1200);
+        assert_eq!(value["submodules"], Value::Null);
     }
 }
